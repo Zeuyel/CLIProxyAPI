@@ -21,6 +21,19 @@ objectstore/*
 # Static assets
 static/*
 
+# Frontend build artifacts
+web/node_modules/
+web/dist/
+web/.vite/
+
+# Local-only work dirs
+claude-code-hub/
+temp-monitor-repo/
+
+# Deno proxy experiments (not part of repo)
+deno-proxy-new.js
+examples/deno-proxy/
+
 # Authentication data
 auths/*
 !auths/.gitkeep
