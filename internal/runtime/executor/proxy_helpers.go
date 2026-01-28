@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -58,6 +59,9 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
 	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
 		httpClient.Transport = rt
+	} else {
+		// No proxy configured, use default transport.
+		httpClient.Transport = &http.Transport{}
 	}
 
 	return httpClient
@@ -106,11 +110,165 @@ func buildProxyTransport(proxyURL string) *http.Transport {
 		}
 	} else if parsedURL.Scheme == "http" || parsedURL.Scheme == "https" {
 		// Configure HTTP or HTTPS proxy
-		transport = &http.Transport{Proxy: http.ProxyURL(parsedURL)}
+		transport = &http.Transport{
+			Proxy: http.ProxyURL(parsedURL),
+		}
 	} else {
 		log.Errorf("unsupported proxy scheme: %s", parsedURL.Scheme)
 		return nil
 	}
 
 	return transport
+}
+
+// resolveReverseProxyURL resolves the final URL based on reverse proxy configuration.
+// If a reverse proxy is configured for the given provider, it rewrites the URL to route
+// through the proxy endpoint.
+//
+// Parameters:
+//   - cfg: The application configuration containing reverse proxy settings
+//   - provider: The provider name (e.g., "codex", "antigravity", "claude")
+//   - originalURL: The original target URL
+//
+// Returns:
+//   - string: The resolved URL (either proxied or original)
+func resolveReverseProxyURL(cfg *config.Config, provider string, originalURL string) string {
+	proxyID := resolveProxyIDForProvider(cfg, provider)
+	return resolveReverseProxyURLWithID(cfg, proxyID, provider, originalURL)
+}
+
+// resolveReverseProxyURLForAuth resolves the reverse proxy URL using per-auth routing when available.
+// It falls back to provider routing when no auth-specific proxy is configured.
+func resolveReverseProxyURLForAuth(cfg *config.Config, auth *cliproxyauth.Auth, provider string, originalURL string) string {
+	proxyID := resolveProxyIDForAuth(cfg, auth)
+	if proxyID == "" {
+		proxyID = resolveProxyIDForProvider(cfg, provider)
+	}
+	return resolveReverseProxyURLWithID(cfg, proxyID, provider, originalURL)
+}
+
+func resolveProxyIDForProvider(cfg *config.Config, provider string) string {
+	if cfg == nil {
+		return ""
+	}
+
+	switch provider {
+	case "codex":
+		return cfg.ProxyRouting.Codex
+	case "antigravity":
+		return cfg.ProxyRouting.Antigravity
+	case "claude":
+		return cfg.ProxyRouting.Claude
+	case "gemini":
+		return cfg.ProxyRouting.Gemini
+	case "gemini-cli":
+		return cfg.ProxyRouting.GeminiCLI
+	case "vertex":
+		return cfg.ProxyRouting.Vertex
+	case "aistudio":
+		return cfg.ProxyRouting.AIStudio
+	case "qwen":
+		return cfg.ProxyRouting.Qwen
+	case "iflow":
+		return cfg.ProxyRouting.IFlow
+	default:
+		return ""
+	}
+}
+
+func resolveProxyIDForAuth(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	if cfg == nil || auth == nil || len(cfg.ProxyRoutingAuth) == 0 {
+		return ""
+	}
+
+	if id := strings.TrimSpace(auth.ID); id != "" {
+		if proxyID := strings.TrimSpace(cfg.ProxyRoutingAuth[id]); proxyID != "" {
+			return proxyID
+		}
+	}
+
+	if idx := strings.TrimSpace(auth.EnsureIndex()); idx != "" {
+		if proxyID := strings.TrimSpace(cfg.ProxyRoutingAuth[idx]); proxyID != "" {
+			return proxyID
+		}
+	}
+
+	if name := strings.TrimSpace(auth.FileName); name != "" {
+		if proxyID := strings.TrimSpace(cfg.ProxyRoutingAuth[name]); proxyID != "" {
+			return proxyID
+		}
+	}
+
+	return ""
+}
+
+func resolveReverseProxyURLWithID(cfg *config.Config, proxyID string, provider string, originalURL string) string {
+	if cfg == nil || len(cfg.ReverseProxies) == 0 || proxyID == "" {
+		return originalURL
+	}
+
+	// Find the proxy configuration
+	var proxyConfig *config.ReverseProxy
+	for i := range cfg.ReverseProxies {
+		if cfg.ReverseProxies[i].ID == proxyID && cfg.ReverseProxies[i].Enabled {
+			proxyConfig = &cfg.ReverseProxies[i]
+			break
+		}
+	}
+
+	if proxyConfig == nil {
+		log.Debugf("reverse proxy %s not found or disabled for provider %s", proxyID, provider)
+		return originalURL
+	}
+
+	// Parse the original URL
+	parsedURL, err := url.Parse(originalURL)
+	if err != nil {
+		log.Errorf("failed to parse original URL %s: %v", originalURL, err)
+		return originalURL
+	}
+
+	// Build the new URL using fixed prefix mapping
+	// Format: proxyBaseURL/prefix/path?query
+	// where prefix is determined by the provider and original host
+	//
+	// Example:
+	//   Original: https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:streamGenerateContent
+	//   Rewritten: https://your-proxy.deno.dev/antigravity-sandbox/v1internal:streamGenerateContent
+	proxyBase := strings.TrimSuffix(proxyConfig.BaseURL, "/")
+
+	// Determine the prefix based on provider and host
+	var prefix string
+	if provider == "antigravity" {
+		// Map Antigravity domains to fixed prefixes
+		switch parsedURL.Host {
+		case "daily-cloudcode-pa.sandbox.googleapis.com":
+			prefix = "/antigravity-sandbox"
+		case "daily-cloudcode-pa.googleapis.com":
+			prefix = "/antigravity-daily"
+		case "cloudcode-pa.googleapis.com":
+			prefix = "/antigravity-cloudcode"
+		default:
+			// Fallback to sandbox
+			prefix = "/antigravity-sandbox"
+		}
+	} else if provider == "codex" {
+		prefix = "/codex"
+	} else {
+		// For other providers, use the provider name as prefix
+		prefix = "/" + provider
+	}
+
+	newPath := parsedURL.Path
+	if !strings.HasPrefix(newPath, "/") {
+		newPath = "/" + newPath
+	}
+
+	newURL := fmt.Sprintf("%s%s%s", proxyBase, prefix, newPath)
+	if parsedURL.RawQuery != "" {
+		newURL += "?" + parsedURL.RawQuery
+	}
+
+	log.Debugf("reverse proxy: %s -> %s (via %s)", originalURL, newURL, proxyConfig.Name)
+	return newURL
 }

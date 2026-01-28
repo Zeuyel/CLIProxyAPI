@@ -113,6 +113,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	url = resolveReverseProxyURLForAuth(e.cfg, auth, "codex", url)
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
 	if err != nil {
 		return resp, err
@@ -225,6 +226,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	url = resolveReverseProxyURLForAuth(e.cfg, auth, "codex", url)
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
 	if err != nil {
 		return nil, err

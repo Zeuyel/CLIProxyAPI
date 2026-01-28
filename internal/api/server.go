@@ -504,6 +504,23 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/proxy-url", s.mgmt.PutProxyURL)
 		mgmt.DELETE("/proxy-url", s.mgmt.DeleteProxyURL)
 
+		// Reverse proxy management
+		mgmt.GET("/reverse-proxies", s.mgmt.GetReverseProxies)
+		mgmt.POST("/reverse-proxies", s.mgmt.CreateReverseProxy)
+		mgmt.PUT("/reverse-proxies/:id", s.mgmt.UpdateReverseProxy)
+		mgmt.PATCH("/reverse-proxies/:id", s.mgmt.UpdateReverseProxy)
+		mgmt.DELETE("/reverse-proxies/:id", s.mgmt.DeleteReverseProxy)
+
+		// Proxy routing configuration
+		mgmt.GET("/proxy-routing", s.mgmt.GetProxyRouting)
+		mgmt.PUT("/proxy-routing", s.mgmt.UpdateProxyRouting)
+		mgmt.PATCH("/proxy-routing", s.mgmt.UpdateProxyRouting)
+
+		// Proxy routing configuration by auth account
+		mgmt.GET("/proxy-routing-auth", s.mgmt.GetProxyRoutingAuth)
+		mgmt.PUT("/proxy-routing-auth", s.mgmt.UpdateProxyRoutingAuth)
+		mgmt.PATCH("/proxy-routing-auth", s.mgmt.UpdateProxyRoutingAuth)
+
 		mgmt.POST("/api-call", s.mgmt.APICall)
 
 		mgmt.GET("/quota-exceeded/switch-project", s.mgmt.GetSwitchProject)

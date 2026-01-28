@@ -645,6 +645,22 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			err = errReq
 			return nil, err
 		}
+
+		// 记录完整请求信息用于调试
+		log.Debugf("=== FULL REQUEST DEBUG ===")
+		log.Debugf("Method: %s", httpReq.Method)
+		log.Debugf("URL: %s", httpReq.URL.String())
+		log.Debugf("Headers:")
+		for k, v := range httpReq.Header {
+			log.Debugf("  %s: %v", k, v)
+		}
+		if httpReq.Body != nil {
+			bodyBytes, _ := io.ReadAll(httpReq.Body)
+			httpReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			log.Debugf("Body: %s", string(bodyBytes))
+		}
+		log.Debugf("=== END REQUEST DEBUG ===")
+
 		httpResp, errDo := httpClient.Do(httpReq)
 		if errDo != nil {
 			recordAPIResponseError(ctx, e.cfg, errDo)
@@ -842,7 +858,8 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 			requestURL.WriteString(url.QueryEscape(opts.Alt))
 		}
 
-		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bytes.NewReader(payload))
+		finalURL := resolveReverseProxyURLForAuth(e.cfg, auth, "antigravity", requestURL.String())
+		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, finalURL, bytes.NewReader(payload))
 		if errReq != nil {
 			return cliproxyexecutor.Response{}, errReq
 		}
@@ -851,7 +868,10 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
 		httpReq.Header.Set("Accept", "application/json")
 		if host := resolveHost(base); host != "" {
-			httpReq.Host = host
+			finalHost := resolveHost(finalURL)
+			if finalHost == "" || strings.EqualFold(finalHost, host) {
+				httpReq.Host = host
+			}
 		}
 
 		recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
@@ -1255,7 +1275,8 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		payload, _ = sjson.DeleteBytes(payload, "request.generationConfig.maxOutputTokens")
 	}
 
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bytes.NewReader(payload))
+	finalURL := resolveReverseProxyURLForAuth(e.cfg, auth, "antigravity", requestURL.String())
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, finalURL, bytes.NewReader(payload))
 	if errReq != nil {
 		return nil, errReq
 	}
@@ -1268,7 +1289,10 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		httpReq.Header.Set("Accept", "application/json")
 	}
 	if host := resolveHost(base); host != "" {
-		httpReq.Host = host
+		finalHost := resolveHost(finalURL)
+		if finalHost == "" || strings.EqualFold(finalHost, host) {
+			httpReq.Host = host
+		}
 	}
 
 	var authID, authLabel, authType, authValue string

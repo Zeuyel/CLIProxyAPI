@@ -65,7 +65,9 @@ func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.
 		}
 	} else if proxyURL.Scheme == "http" || proxyURL.Scheme == "https" {
 		// Configure HTTP or HTTPS proxy.
-		transport = &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+		transport = &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		}
 	} else {
 		log.Errorf("unsupported proxy scheme: %s", proxyURL.Scheme)
 		return nil

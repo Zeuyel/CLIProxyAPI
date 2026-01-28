@@ -109,6 +109,16 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// ReverseProxies defines reverse proxy endpoints for routing traffic.
+	ReverseProxies []ReverseProxy `yaml:"reverse-proxies,omitempty" json:"reverse-proxies,omitempty"`
+
+	// ProxyRouting defines which reverse proxy each provider should use.
+	ProxyRouting ProxyRouting `yaml:"proxy-routing,omitempty" json:"proxy-routing,omitempty"`
+
+	// ProxyRoutingAuth defines which reverse proxy each auth account should use.
+	// Keys can be auth ID, auth index, or auth file name.
+	ProxyRoutingAuth map[string]string `yaml:"proxy-routing-auth,omitempty" json:"proxy-routing-auth,omitempty"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
@@ -1684,3 +1694,61 @@ func removeLegacyAuthBlock(root *yaml.Node) {
 	}
 	removeMapKey(root, "auth")
 }
+
+// ReverseProxy represents a reverse proxy endpoint configuration.
+type ReverseProxy struct {
+	// ID is the unique identifier for this reverse proxy.
+	ID string `yaml:"id" json:"id"`
+
+	// Name is the display name for this reverse proxy.
+	Name string `yaml:"name" json:"name"`
+
+	// BaseURL is the base URL of the reverse proxy endpoint.
+	BaseURL string `yaml:"base-url" json:"base-url"`
+
+	// Enabled indicates whether this reverse proxy is active.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// Description provides additional information about this reverse proxy.
+	Description string `yaml:"description,omitempty" json:"description,omitempty"`
+
+	// Headers are custom HTTP headers to include in requests to this proxy.
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// Timeout is the request timeout in seconds for this proxy.
+	Timeout int `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+
+	// CreatedAt is the timestamp when this proxy was created.
+	CreatedAt string `yaml:"created-at,omitempty" json:"created-at,omitempty"`
+}
+
+// ProxyRouting defines which reverse proxy each provider should use.
+type ProxyRouting struct {
+	// Codex specifies the reverse proxy ID for Codex requests.
+	Codex string `yaml:"codex,omitempty" json:"codex,omitempty"`
+
+	// Antigravity specifies the reverse proxy ID for Antigravity requests.
+	Antigravity string `yaml:"antigravity,omitempty" json:"antigravity,omitempty"`
+
+	// Claude specifies the reverse proxy ID for Claude requests.
+	Claude string `yaml:"claude,omitempty" json:"claude,omitempty"`
+
+	// Gemini specifies the reverse proxy ID for Gemini requests.
+	Gemini string `yaml:"gemini,omitempty" json:"gemini,omitempty"`
+
+	// GeminiCLI specifies the reverse proxy ID for Gemini CLI requests.
+	GeminiCLI string `yaml:"gemini-cli,omitempty" json:"gemini-cli,omitempty"`
+
+	// Vertex specifies the reverse proxy ID for Vertex requests.
+	Vertex string `yaml:"vertex,omitempty" json:"vertex,omitempty"`
+
+	// AIStudio specifies the reverse proxy ID for AI Studio requests.
+	AIStudio string `yaml:"aistudio,omitempty" json:"aistudio,omitempty"`
+
+	// Qwen specifies the reverse proxy ID for Qwen requests.
+	Qwen string `yaml:"qwen,omitempty" json:"qwen,omitempty"`
+
+	// IFlow specifies the reverse proxy ID for IFlow requests.
+	IFlow string `yaml:"iflow,omitempty" json:"iflow,omitempty"`
+}
+

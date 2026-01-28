@@ -306,3 +306,42 @@ oauth-model-alias:
 #           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex
 #       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
 #         "response_format": "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answer\",\"schema\":{\"type\":\"object\"}}}"
+
+# Reverse Proxy Configuration
+# Configure reverse proxy endpoints to route traffic through intermediate servers.
+# This is useful when direct access to AI provider APIs is restricted or when you want
+# to route traffic through a proxy server (e.g., Deno Deploy, Cloudflare Workers).
+# reverse-proxies:
+#   - id: "deno-proxy-1"                                    # Unique identifier for this proxy
+#     name: "Deno Deploy Proxy"                             # Display name
+#     base-url: "https://your-proxy.deno.dev"              # Base URL of the reverse proxy
+#     enabled: true                                         # Whether this proxy is active
+#     description: "Main Deno Deploy reverse proxy"        # Optional description
+#     timeout: 120                                          # Optional timeout in seconds
+#     headers:                                              # Optional custom headers
+#       X-Custom-Header: "custom-value"
+#   - id: "cloudflare-proxy"
+#     name: "Cloudflare Workers Proxy"
+#     base-url: "https://your-worker.workers.dev"
+#     enabled: true
+#     description: "Cloudflare Workers reverse proxy"
+
+# Proxy Routing Configuration
+# Specify which reverse proxy each AI provider should use.
+# Leave empty or omit to use direct connection (no proxy).
+# proxy-routing:
+#   codex: "deno-proxy-1"        # Route Codex requests through deno-proxy-1
+#   antigravity: "deno-proxy-1"  # Route Antigravity requests through deno-proxy-1
+#   claude: ""                   # Direct connection (no proxy)
+#   gemini: ""                   # Direct connection (no proxy)
+#   gemini-cli: ""               # Direct connection (no proxy)
+#   vertex: ""                   # Direct connection (no proxy)
+#   aistudio: ""                 # Direct connection (no proxy)
+#   qwen: ""                     # Direct connection (no proxy)
+#   iflow: ""                    # Direct connection (no proxy)
+
+# Proxy Routing by Auth Account
+# Map a specific auth account to a reverse proxy. Keys can be auth ID, auth index,
+# or auth file name. When configured, it takes precedence over provider routing.
+# proxy-routing-auth:
+#   auth_id_or_index: "deno-proxy-1"  # Route this auth account through deno-proxy-1
