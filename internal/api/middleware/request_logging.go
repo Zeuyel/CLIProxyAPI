@@ -8,9 +8,11 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 )
 
@@ -31,13 +33,20 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		}
 
 		path := c.Request.URL.Path
-		if !shouldLogRequest(path) {
-			c.Next()
-			return
-		}
+	if !shouldLogRequest(path) {
+		c.Next()
+		return
+	}
 
-		// Capture request information
-		requestInfo, err := captureRequestInfo(c)
+	requestID := logging.GetGinRequestID(c)
+	if requestID == "" {
+		requestID = logging.GenerateRequestID()
+		logging.SetGinRequestID(c, requestID)
+	}
+	usage.StartRequestLog(requestID, c.Request.Method, path, time.Now())
+
+	// Capture request information
+	requestInfo, err := captureRequestInfo(c)
 		if err != nil {
 			// Log error but continue processing
 			// In a real implementation, you might want to use a proper logger here

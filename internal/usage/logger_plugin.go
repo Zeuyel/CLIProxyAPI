@@ -92,6 +92,8 @@ type RequestDetail struct {
 	Timestamp time.Time  `json:"timestamp"`
 	Source    string     `json:"source"`
 	AuthIndex string     `json:"auth_index"`
+	RequestID string     `json:"request_id"`
+	SessionID string     `json:"session_id"`
 	Tokens    TokenStats `json:"tokens"`
 	Failed    bool       `json:"failed"`
 }
@@ -200,6 +202,8 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		Timestamp: timestamp,
 		Source:    record.Source,
 		AuthIndex: record.AuthIndex,
+		RequestID: record.RequestID,
+		SessionID: record.SessionID,
 		Tokens:    detail,
 		Failed:    failed,
 	})
@@ -379,12 +383,14 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := normaliseTokenStats(detail.Tokens)
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
+		"%s|%s|%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
 		apiName,
 		modelName,
 		timestamp,
 		detail.Source,
 		detail.AuthIndex,
+		detail.RequestID,
+		detail.SessionID,
 		detail.Failed,
 		tokens.InputTokens,
 		tokens.OutputTokens,

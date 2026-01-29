@@ -7,10 +7,13 @@ import (
 	"bytes"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	"github.com/tidwall/gjson"
 )
 
 // RequestInfo holds essential details of an incoming HTTP request for logging purposes.
@@ -265,6 +268,7 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 
 	hasAPIError := len(slicesAPIResponseError) > 0 || finalStatusCode >= http.StatusBadRequest
 	forceLog := w.logOnErrorOnly && hasAPIError && !w.logger.IsEnabled()
+	w.recordRequestLog(c, finalStatusCode, slicesAPIResponseError, w.body.Bytes())
 	if !w.logger.IsEnabled() && !forceLog {
 		return nil
 	}
@@ -298,6 +302,58 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	}
 
 	return w.logRequest(finalStatusCode, w.cloneHeaders(), w.body.Bytes(), w.extractAPIRequest(c), w.extractAPIResponse(c), slicesAPIResponseError, forceLog)
+}
+
+func (w *ResponseWriterWrapper) recordRequestLog(c *gin.Context, statusCode int, apiErrors []*interfaces.ErrorMessage, responseBody []byte) {
+	if w == nil || w.requestInfo == nil {
+		return
+	}
+	requestID := strings.TrimSpace(w.requestInfo.RequestID)
+	if requestID == "" {
+		return
+	}
+
+	update := usage.RequestLogUpdate{
+		APIKey:      getStringFromContext(c, "apiKey"),
+		RequestType: getStringFromContext(c, "monitor_request_type"),
+		Model:       getStringFromContext(c, "monitor_model"),
+		SessionID:   getStringFromContext(c, "monitor_session_id"),
+	}
+	usage.UpdateRequestLog(requestID, update)
+
+	errMessage := ""
+	if len(apiErrors) > 0 && apiErrors[0] != nil && apiErrors[0].Error != nil {
+		errMessage = strings.TrimSpace(apiErrors[0].Error.Error())
+	}
+	if errMessage == "" && statusCode >= http.StatusBadRequest {
+		errMessage = summarizeErrorMessage(responseBody)
+	}
+
+	usage.FinishRequestLog(requestID, statusCode, errMessage, time.Now())
+}
+
+func getStringFromContext(c *gin.Context, key string) string {
+	if c == nil || key == "" {
+		return ""
+	}
+	if value, ok := c.Get(key); ok {
+		switch typed := value.(type) {
+		case string:
+			return strings.TrimSpace(typed)
+		case []byte:
+			return strings.TrimSpace(string(typed))
+		}
+	}
+	return ""
+}
+
+func summarizeErrorMessage(body []byte) string {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || !gjson.ValidBytes(trimmed) {
+		return ""
+	}
+	message := gjson.GetBytes(trimmed, "error.message").String()
+	return strings.TrimSpace(message)
 }
 
 func (w *ResponseWriterWrapper) cloneHeaders() map[string][]string {

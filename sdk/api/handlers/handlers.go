@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -17,11 +18,13 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/tidwall/gjson"
 	"golang.org/x/net/context"
 )
 
@@ -51,6 +54,21 @@ const (
 	defaultStreamingKeepAliveSeconds = 0
 	defaultStreamingBootstrapRetries = 0
 )
+
+const (
+	sessionHeaderKey    = "session_id"
+	sessionHeaderAltKey = "x-session-id"
+	sessionMarker       = "_session_"
+	sessionIDMaxLength  = 256
+)
+
+const (
+	monitorRequestTypeKey = "monitor_request_type"
+	monitorModelKey       = "monitor_model"
+	monitorSessionKey     = "monitor_session_id"
+)
+
+var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.:\-]+$`)
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
 // If errText is already valid JSON, it is returned as-is to preserve upstream error payloads.
@@ -153,6 +171,111 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 		key = uuid.NewString()
 	}
 	return map[string]any{idempotencyKeyMetadataKey: key}
+}
+
+func updateMonitorRequestContext(ctx context.Context, requestType, model, sessionID string) {
+	if ctx == nil {
+		return
+	}
+	ginCtx, _ := ctx.Value("gin").(*gin.Context)
+	if ginCtx != nil {
+		if requestType != "" {
+			ginCtx.Set(monitorRequestTypeKey, requestType)
+		}
+		if model != "" {
+			ginCtx.Set(monitorModelKey, model)
+		}
+		if sessionID != "" {
+			ginCtx.Set(monitorSessionKey, sessionID)
+		}
+	}
+
+	requestID := logging.GetRequestID(ctx)
+	if requestID == "" {
+		return
+	}
+	usage.UpdateRequestLog(requestID, usage.RequestLogUpdate{
+		RequestType: requestType,
+		Model:       model,
+		SessionID:   sessionID,
+	})
+}
+
+func resolveSessionID(ctx context.Context, handlerType string, rawJSON []byte) string {
+	headers := http.Header{}
+	if ctx != nil {
+		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+			headers = ginCtx.Request.Header
+		}
+	}
+	return extractSessionID(handlerType, rawJSON, headers)
+}
+
+func extractSessionID(handlerType string, rawJSON []byte, headers http.Header) string {
+	sessionID := sanitizeSessionID(headers.Get(sessionHeaderKey))
+	if sessionID == "" {
+		sessionID = sanitizeSessionID(headers.Get(sessionHeaderAltKey))
+	}
+	if sessionID != "" {
+		return sessionID
+	}
+	if isCodexRequest(rawJSON) {
+		if value := sanitizeSessionID(gjson.GetBytes(rawJSON, "prompt_cache_key").String()); value != "" {
+			return value
+		}
+		if value := sanitizeSessionID(gjson.GetBytes(rawJSON, "metadata.session_id").String()); value != "" {
+			return value
+		}
+		if value := sanitizeSessionID(gjson.GetBytes(rawJSON, "previous_response_id").String()); value != "" {
+			return "codex_prev_" + value
+		}
+	}
+	if value := extractClaudeSessionFromUserID(gjson.GetBytes(rawJSON, "metadata.user_id").String()); value != "" {
+		return value
+	}
+	if value := sanitizeSessionID(gjson.GetBytes(rawJSON, "metadata.session_id").String()); value != "" {
+		return value
+	}
+	return ""
+}
+
+func sanitizeSessionID(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	if len(trimmed) > sessionIDMaxLength {
+		return ""
+	}
+	if !sessionIDPattern.MatchString(trimmed) {
+		return ""
+	}
+	return trimmed
+}
+
+func extractClaudeSessionFromUserID(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	idx := strings.Index(trimmed, sessionMarker)
+	if idx < 0 {
+		return ""
+	}
+	return sanitizeSessionID(trimmed[idx+len(sessionMarker):])
+}
+
+func isCodexRequest(rawJSON []byte) bool {
+	if len(rawJSON) == 0 {
+		return false
+	}
+	if gjson.GetBytes(rawJSON, "input").Exists() {
+		return true
+	}
+	if gjson.GetBytes(rawJSON, "prompt_cache_key").Exists() {
+		return true
+	}
+	return false
 }
 
 func mergeMetadata(base, overlay map[string]any) map[string]any {
@@ -386,6 +509,12 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	sessionID := resolveSessionID(ctx, handlerType, rawJSON)
+	if sessionID != "" {
+		reqMeta[coreexecutor.SessionIDMetadataKey] = sessionID
+		ctx = coreauth.WithSessionID(ctx, sessionID)
+	}
+	updateMonitorRequestContext(ctx, handlerType, normalizedModel, sessionID)
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
 		Payload: cloneBytes(rawJSON),
@@ -425,6 +554,12 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	sessionID := resolveSessionID(ctx, handlerType, rawJSON)
+	if sessionID != "" {
+		reqMeta[coreexecutor.SessionIDMetadataKey] = sessionID
+		ctx = coreauth.WithSessionID(ctx, sessionID)
+	}
+	updateMonitorRequestContext(ctx, handlerType, normalizedModel, sessionID)
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
 		Payload: cloneBytes(rawJSON),
@@ -467,6 +602,12 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	sessionID := resolveSessionID(ctx, handlerType, rawJSON)
+	if sessionID != "" {
+		reqMeta[coreexecutor.SessionIDMetadataKey] = sessionID
+		ctx = coreauth.WithSessionID(ctx, sessionID)
+	}
+	updateMonitorRequestContext(ctx, handlerType, normalizedModel, sessionID)
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
 		Payload: cloneBytes(rawJSON),

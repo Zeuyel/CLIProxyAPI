@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
@@ -22,6 +23,8 @@ type usageReporter struct {
 	authIndex   string
 	apiKey      string
 	source      string
+	sessionID   string
+	requestID   string
 	requestedAt time.Time
 	once        sync.Once
 }
@@ -34,6 +37,8 @@ func newUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		requestedAt: time.Now(),
 		apiKey:      apiKey,
 		source:      resolveUsageSource(auth, apiKey),
+		sessionID:   cliproxyauth.SessionIDFromContext(ctx),
+		requestID:   logging.GetRequestID(ctx),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -78,8 +83,10 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 			Model:       r.model,
 			Source:      r.source,
 			APIKey:      r.apiKey,
+			RequestID:   r.requestID,
 			AuthID:      r.authID,
 			AuthIndex:   r.authIndex,
+			SessionID:   r.sessionID,
 			RequestedAt: r.requestedAt,
 			Failed:      failed,
 			Detail:      detail,
@@ -101,8 +108,10 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 			Model:       r.model,
 			Source:      r.source,
 			APIKey:      r.apiKey,
+			RequestID:   r.requestID,
 			AuthID:      r.authID,
 			AuthIndex:   r.authIndex,
+			SessionID:   r.sessionID,
 			RequestedAt: r.requestedAt,
 			Failed:      false,
 			Detail:      usage.Detail{},

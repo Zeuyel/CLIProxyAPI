@@ -13,8 +13,10 @@ type Record struct {
 	Provider    string
 	Model       string
 	APIKey      string
+	RequestID   string
 	AuthID      string
 	AuthIndex   string
+	SessionID   string
 	Source      string
 	RequestedAt time.Time
 	Failed      bool

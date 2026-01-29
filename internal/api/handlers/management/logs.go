@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
 
 const (
@@ -82,6 +83,17 @@ func (h *Handler) GetLogs(c *gin.Context) {
 		"line-count":       total,
 		"latest-timestamp": latest,
 	})
+}
+
+// GetMonitorRequestLogs returns recent request entries for the monitor request log.
+func (h *Handler) GetMonitorRequestLogs(c *gin.Context) {
+	limit, errLimit := parseLimit(c.Query("limit"))
+	if errLimit != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid limit: %v", errLimit)})
+		return
+	}
+	logs := usage.SnapshotRequestLogs(limit)
+	c.JSON(http.StatusOK, gin.H{"logs": logs})
 }
 
 // DeleteLogs removes all rotated log files and truncates the active log.
