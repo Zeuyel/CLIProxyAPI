@@ -160,6 +160,38 @@ type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
 	// Supported values: "round-robin" (default), "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+	// Session configures session-aware routing (sticky sessions + scoring).
+	Session SessionRoutingConfig `yaml:"session,omitempty" json:"session,omitempty"`
+}
+
+// SessionRoutingConfig configures session stickiness and scoring.
+type SessionRoutingConfig struct {
+	// Enabled toggles session-aware routing.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Providers restricts session routing to specific provider keys (e.g. ["codex","claude"]).
+	Providers []string `yaml:"providers,omitempty" json:"providers,omitempty"`
+	// TTLSeconds controls how long a session binding stays active.
+	TTLSeconds int `yaml:"ttl-seconds,omitempty" json:"ttl-seconds,omitempty"`
+	// FailureThreshold triggers failover after consecutive failures on the bound auth.
+	FailureThreshold int `yaml:"failure-threshold,omitempty" json:"failure-threshold,omitempty"`
+	// CooldownSeconds keeps a failed auth out of selection for the session.
+	CooldownSeconds int `yaml:"cooldown-seconds,omitempty" json:"cooldown-seconds,omitempty"`
+	// LoadWindowSeconds defines the in-memory window for request count weighting.
+	LoadWindowSeconds int `yaml:"load-window-seconds,omitempty" json:"load-window-seconds,omitempty"`
+	// LoadWeight scales the penalty of high recent request volume.
+	LoadWeight float64 `yaml:"load-weight,omitempty" json:"load-weight,omitempty"`
+	// HealthWindowRequests defines how many recent outcomes to keep for scoring.
+	HealthWindowRequests int `yaml:"health-window-requests,omitempty" json:"health-window-requests,omitempty"`
+	// WeightSuccessRate weights success-rate contribution in the score.
+	WeightSuccessRate float64 `yaml:"weight-success-rate,omitempty" json:"weight-success-rate,omitempty"`
+	// WeightQuota weights quota-health contribution in the score.
+	WeightQuota float64 `yaml:"weight-quota,omitempty" json:"weight-quota,omitempty"`
+	// PenaltyStatus429 sets penalty weight for 429 responses.
+	PenaltyStatus429 float64 `yaml:"penalty-status-429,omitempty" json:"penalty-status-429,omitempty"`
+	// PenaltyStatus403 sets penalty weight for 403/402 responses.
+	PenaltyStatus403 float64 `yaml:"penalty-status-403,omitempty" json:"penalty-status-403,omitempty"`
+	// PenaltyStatus5xx sets penalty weight for 5xx responses.
+	PenaltyStatus5xx float64 `yaml:"penalty-status-5xx,omitempty" json:"penalty-status-5xx,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

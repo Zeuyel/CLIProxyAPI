@@ -171,6 +171,29 @@ func (m *Manager) SetSelector(selector Selector) {
 	m.mu.Unlock()
 }
 
+// GetSelector returns the current selector.
+func (m *Manager) GetSelector() Selector {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.selector
+}
+
+// SetHook replaces the lifecycle hook used by the manager.
+func (m *Manager) SetHook(hook Hook) {
+	if m == nil {
+		return
+	}
+	if hook == nil {
+		hook = NoopHook{}
+	}
+	m.mu.Lock()
+	m.hook = hook
+	m.mu.Unlock()
+}
+
 // SetStore swaps the underlying persistence store.
 func (m *Manager) SetStore(store Store) {
 	m.mu.Lock()

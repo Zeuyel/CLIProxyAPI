@@ -507,9 +507,11 @@ func (s *Service) Run(ctx context.Context) error {
 	var watcherWrapper *WatcherWrapper
 	reloadCallback := func(newCfg *config.Config) {
 		previousStrategy := ""
+		previousSessionEnabled := false
 		s.cfgMu.RLock()
 		if s.cfg != nil {
 			previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
+			previousSessionEnabled = s.cfg.Routing.Session.Enabled
 		}
 		s.cfgMu.RUnlock()
 
@@ -522,7 +524,6 @@ func (s *Service) Run(ctx context.Context) error {
 			return
 		}
 
-		nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
 		normalizeStrategy := func(strategy string) string {
 			switch strategy {
 			case "fill-first", "fillfirst", "ff":
@@ -532,17 +533,40 @@ func (s *Service) Run(ctx context.Context) error {
 			}
 		}
 		previousStrategy = normalizeStrategy(previousStrategy)
-		nextStrategy = normalizeStrategy(nextStrategy)
-		if s.coreManager != nil && previousStrategy != nextStrategy {
-			var selector coreauth.Selector
-			switch nextStrategy {
-			case "fill-first":
-				selector = &coreauth.FillFirstSelector{}
-			default:
-				selector = &coreauth.RoundRobinSelector{}
+		nextStrategy := normalizeStrategy(strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy)))
+		previousMode := previousStrategy
+		nextMode := nextStrategy
+		if previousSessionEnabled {
+			previousMode = "session"
+		}
+		if newCfg.Routing.Session.Enabled {
+			nextMode = "session"
+		}
+		if s.coreManager != nil {
+			if previousMode != nextMode {
+				selector, hook := buildSelectorAndHook(newCfg)
+				s.coreManager.SetSelector(selector)
+				s.coreManager.SetHook(hook)
+				log.Infof("routing strategy updated to %s", nextMode)
+			} else if nextMode == "session" {
+				if selector, ok := s.coreManager.GetSelector().(*coreauth.SessionSelector); ok {
+					selector.UpdateConfig(coreauth.SessionSelectorConfig{
+						Enabled:           newCfg.Routing.Session.Enabled,
+						Providers:         newCfg.Routing.Session.Providers,
+						TTL:              time.Duration(newCfg.Routing.Session.TTLSeconds) * time.Second,
+						FailureThreshold: newCfg.Routing.Session.FailureThreshold,
+						Cooldown:         time.Duration(newCfg.Routing.Session.CooldownSeconds) * time.Second,
+						LoadWindow:       time.Duration(newCfg.Routing.Session.LoadWindowSeconds) * time.Second,
+						LoadWeight:       newCfg.Routing.Session.LoadWeight,
+						HealthWindow:     newCfg.Routing.Session.HealthWindowRequests,
+						WeightSuccess:    newCfg.Routing.Session.WeightSuccessRate,
+						WeightQuota:      newCfg.Routing.Session.WeightQuota,
+						Penalty429:       newCfg.Routing.Session.PenaltyStatus429,
+						Penalty403:       newCfg.Routing.Session.PenaltyStatus403,
+						Penalty5xx:       newCfg.Routing.Session.PenaltyStatus5xx,
+					})
+				}
 			}
-			s.coreManager.SetSelector(selector)
-			log.Infof("routing strategy updated to %s", nextStrategy)
 		}
 
 		s.applyRetryConfig(newCfg)

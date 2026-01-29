@@ -73,6 +73,21 @@ quota-exceeded:
 # Routing strategy for selecting credentials when multiple match.
 routing:
   strategy: "round-robin" # round-robin (default), fill-first
+  # Session-aware routing (sticky sessions + health/load scoring).
+  # session:
+  #   enabled: true
+  #   providers: ["codex", "claude"]
+  #   ttl-seconds: 300
+  #   failure-threshold: 3
+  #   cooldown-seconds: 300
+  #   load-window-seconds: 600
+  #   load-weight: 0.25
+  #   health-window-requests: 50
+  #   weight-success-rate: 0.6
+  #   weight-quota: 0.4
+  #   penalty-status-429: 1.0
+  #   penalty-status-403: 0.7
+  #   penalty-status-5xx: 0.4
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false

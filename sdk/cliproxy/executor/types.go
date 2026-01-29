@@ -10,6 +10,9 @@ import (
 // RequestedModelMetadataKey stores the client-requested model name in Options.Metadata.
 const RequestedModelMetadataKey = "requested_model"
 
+// SessionIDMetadataKey stores the resolved session identifier in Options.Metadata.
+const SessionIDMetadataKey = "session_id"
+
 // Request encapsulates the translated payload that will be sent to a provider executor.
 type Request struct {
 	// Model is the upstream model identifier after translation.

@@ -6,6 +6,7 @@ package cliproxy
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -199,19 +200,8 @@ func (b *Builder) Build() (*Service, error) {
 			dirSetter.SetBaseDir(b.cfg.AuthDir)
 		}
 
-		strategy := ""
-		if b.cfg != nil {
-			strategy = strings.ToLower(strings.TrimSpace(b.cfg.Routing.Strategy))
-		}
-		var selector coreauth.Selector
-		switch strategy {
-		case "fill-first", "fillfirst", "ff":
-			selector = &coreauth.FillFirstSelector{}
-		default:
-			selector = &coreauth.RoundRobinSelector{}
-		}
-
-		coreManager = coreauth.NewManager(tokenStore, selector, nil)
+		selector, hook := buildSelectorAndHook(b.cfg)
+		coreManager = coreauth.NewManager(tokenStore, selector, hook)
 	}
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
@@ -231,4 +221,37 @@ func (b *Builder) Build() (*Service, error) {
 		serverOptions:  append([]api.ServerOption(nil), b.serverOptions...),
 	}
 	return service, nil
+}
+
+func buildSelectorAndHook(cfg *config.Config) (coreauth.Selector, coreauth.Hook) {
+	if cfg != nil && cfg.Routing.Session.Enabled {
+		sessionCfg := cfg.Routing.Session
+		selector := coreauth.NewSessionSelector(coreauth.SessionSelectorConfig{
+			Enabled:           sessionCfg.Enabled,
+			Providers:         sessionCfg.Providers,
+			TTL:              time.Duration(sessionCfg.TTLSeconds) * time.Second,
+			FailureThreshold: sessionCfg.FailureThreshold,
+			Cooldown:         time.Duration(sessionCfg.CooldownSeconds) * time.Second,
+			LoadWindow:       time.Duration(sessionCfg.LoadWindowSeconds) * time.Second,
+			LoadWeight:       sessionCfg.LoadWeight,
+			HealthWindow:     sessionCfg.HealthWindowRequests,
+			WeightSuccess:    sessionCfg.WeightSuccessRate,
+			WeightQuota:      sessionCfg.WeightQuota,
+			Penalty429:       sessionCfg.PenaltyStatus429,
+			Penalty403:       sessionCfg.PenaltyStatus403,
+			Penalty5xx:       sessionCfg.PenaltyStatus5xx,
+		})
+		return selector, coreauth.SessionSelectorHook{Selector: selector}
+	}
+
+	strategy := ""
+	if cfg != nil {
+		strategy = strings.ToLower(strings.TrimSpace(cfg.Routing.Strategy))
+	}
+	switch strategy {
+	case "fill-first", "fillfirst", "ff":
+		return &coreauth.FillFirstSelector{}, nil
+	default:
+		return &coreauth.RoundRobinSelector{}, nil
+	}
 }
