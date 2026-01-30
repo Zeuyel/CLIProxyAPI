@@ -671,10 +671,27 @@ func (h *Handler) authIDForPath(path string) string {
 	if authDir == "" {
 		return path
 	}
-	if rel, err := filepath.Rel(authDir, path); err == nil && rel != "" {
+	cleanedPath := filepath.Clean(path)
+	cleanedAuthDir := filepath.Clean(authDir)
+	if absPath, err := filepath.Abs(cleanedPath); err == nil {
+		cleanedPath = absPath
+	}
+	if absDir, err := filepath.Abs(cleanedAuthDir); err == nil {
+		cleanedAuthDir = absDir
+	}
+	if rel, err := filepath.Rel(cleanedAuthDir, cleanedPath); err == nil && rel != "" && rel != "." {
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return cleanedPath
+		}
 		return rel
 	}
-	return path
+	if rel, err := filepath.Rel(authDir, path); err == nil && rel != "" && rel != "." {
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return cleanedPath
+		}
+		return rel
+	}
+	return cleanedPath
 }
 
 func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []byte) error {

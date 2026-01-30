@@ -30,8 +30,16 @@ func NewFileTokenStore() *FileTokenStore {
 
 // SetBaseDir updates the default directory used for auth JSON persistence when no explicit path is provided.
 func (s *FileTokenStore) SetBaseDir(dir string) {
+	cleaned := strings.TrimSpace(dir)
+	if cleaned != "" {
+		if abs, err := filepath.Abs(cleaned); err == nil {
+			cleaned = abs
+		} else {
+			cleaned = filepath.Clean(cleaned)
+		}
+	}
 	s.dirLock.Lock()
-	s.baseDir = strings.TrimSpace(dir)
+	s.baseDir = cleaned
 	s.dirLock.Unlock()
 }
 
@@ -244,9 +252,20 @@ func (s *FileTokenStore) idFor(path, baseDir string) string {
 	if baseDir == "" {
 		return path
 	}
-	rel, err := filepath.Rel(baseDir, path)
-	if err != nil {
-		return path
+	cleanedBase := filepath.Clean(baseDir)
+	cleanedPath := filepath.Clean(path)
+	if absBase, err := filepath.Abs(cleanedBase); err == nil {
+		cleanedBase = absBase
+	}
+	if absPath, err := filepath.Abs(cleanedPath); err == nil {
+		cleanedPath = absPath
+	}
+	rel, err := filepath.Rel(cleanedBase, cleanedPath)
+	if err != nil || rel == "" || rel == "." {
+		return cleanedPath
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return cleanedPath
 	}
 	return rel
 }
