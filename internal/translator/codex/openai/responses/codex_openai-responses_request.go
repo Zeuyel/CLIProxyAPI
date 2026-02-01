@@ -2,6 +2,7 @@ package responses
 
 import (
 	"bytes"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -79,6 +80,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 			newInput, _ = sjson.SetRaw(newInput, "-1", item.Raw)
 		}
 		rawJSON, _ = sjson.SetRawBytes(rawJSON, "input", []byte(newInput))
+		rawJSON = convertSystemRoleToDeveloper(rawJSON)
 		return rawJSON
 	}
 	// log.Debugf("instructions not matched, %s\n", originalInstructions)
@@ -107,6 +109,30 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	}
 
 	rawJSON, _ = sjson.SetBytes(rawJSON, "instructions", instructions)
+	rawJSON = convertSystemRoleToDeveloper(rawJSON)
 
 	return rawJSON
+}
+
+// convertSystemRoleToDeveloper traverses the input array and converts any message items
+// with role "system" to role "developer". This is necessary because Codex API does not
+// accept "system" role in the input array.
+func convertSystemRoleToDeveloper(rawJSON []byte) []byte {
+	inputResult := gjson.GetBytes(rawJSON, "input")
+	if !inputResult.IsArray() {
+		return rawJSON
+	}
+
+	inputArray := inputResult.Array()
+	result := rawJSON
+
+	// Directly modify role values for items with "system" role
+	for i := 0; i < len(inputArray); i++ {
+		rolePath := fmt.Sprintf("input.%d.role", i)
+		if gjson.GetBytes(result, rolePath).String() == "system" {
+			result, _ = sjson.SetBytes(result, rolePath, "developer")
+		}
+	}
+
+	return result
 }
