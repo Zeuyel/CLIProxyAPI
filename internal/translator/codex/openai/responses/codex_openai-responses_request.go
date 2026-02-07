@@ -1,7 +1,6 @@
 package responses
 
 import (
-	"bytes"
 	"fmt"
 	"strconv"
 	"strings"
@@ -12,7 +11,7 @@ import (
 )
 
 func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
-	rawJSON := bytes.Clone(inputRawJSON)
+	rawJSON := inputRawJSON
 	userAgent := misc.ExtractCodexUserAgent(rawJSON)
 	rawJSON = misc.StripCodexUserAgent(rawJSON)
 
