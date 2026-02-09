@@ -342,8 +342,8 @@ export function RequestLogs({
               totalTokens: detail.tokens.total_tokens || 0,
               sessionId: detail.session_id || '',
               requestId: detail.request_id || '',
-              statusCode: liveEntry?.status_code || 0,
-              durationMs: liveEntry?.duration_ms || 0,
+              statusCode: detail.status_code || liveEntry?.status_code || 0,
+              durationMs: detail.duration_ms || liveEntry?.duration_ms || 0,
               errorMessage: liveEntry?.error_message || '',
               pending: liveEntry?.pending ?? false,
             });

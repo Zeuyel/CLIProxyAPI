@@ -26,6 +26,8 @@ type usageReporter struct {
 	sessionID   string
 	requestID   string
 	requestedAt time.Time
+	statusCode  int
+	durationMs  int64
 	once        sync.Once
 }
 
@@ -45,6 +47,14 @@ func newUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		reporter.authIndex = auth.EnsureIndex()
 	}
 	return reporter
+}
+
+func (r *usageReporter) setPerformance(statusCode int, durationMs int64) {
+	if r == nil {
+		return
+	}
+	r.statusCode = statusCode
+	r.durationMs = durationMs
 }
 
 func (r *usageReporter) publish(ctx context.Context, detail usage.Detail) {
@@ -129,6 +139,8 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 			SessionID:   r.sessionID,
 			RequestedAt: r.requestedAt,
 			Failed:      failed,
+			StatusCode:  r.statusCode,
+			DurationMs:  r.durationMs,
 			Detail:      detail,
 		})
 	})
@@ -154,6 +166,8 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 			SessionID:   r.sessionID,
 			RequestedAt: r.requestedAt,
 			Failed:      false,
+			StatusCode:  r.statusCode,
+			DurationMs:  r.durationMs,
 			Detail:      usage.Detail{},
 		})
 	})

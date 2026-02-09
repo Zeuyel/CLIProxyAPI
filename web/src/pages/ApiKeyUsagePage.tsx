@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -25,6 +25,8 @@ export function ApiKeyUsagePage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [data, setData] = useState<ClientAuthFileUsageResponse | null>(null);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const effectiveBase = useMemo(() => {
     const baseToUse = apiBase ? normalizeApiBase(apiBase) : detectedBase;
@@ -60,6 +62,27 @@ export function ApiKeyUsagePage() {
     },
     [loading, loadUsage]
   );
+
+  // Auto-refresh effect: start polling when data is loaded and autoRefresh is enabled
+  useEffect(() => {
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+
+    if (data && autoRefresh && apiKey.trim()) {
+      intervalRef.current = setInterval(() => {
+        void loadUsage();
+      }, 5000); // Refresh every 5 seconds
+    }
+
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+    };
+  }, [data, autoRefresh, apiKey, loadUsage]);
 
   return (
     <div className={`login-page ${styles.page}`}>
@@ -133,6 +156,18 @@ export function ApiKeyUsagePage() {
           {loading ? t('api_key_usage.refreshing') : t('api_key_usage.refresh')}
         </Button>
 
+        {data && (
+          <div className="toggle-advanced">
+            <input
+              id="auto-refresh-toggle"
+              type="checkbox"
+              checked={autoRefresh}
+              onChange={(e) => setAutoRefresh(e.target.checked)}
+            />
+            <label htmlFor="auto-refresh-toggle">{t('api_key_usage.auto_refresh')}</label>
+          </div>
+        )}
+
         {error && <div className="error-box">{error}</div>}
 
         {data && (
@@ -149,10 +184,6 @@ export function ApiKeyUsagePage() {
               <div>
                 {t('api_key_usage.total_tokens')}:&nbsp;
                 <span className={styles.summaryValue}>{data.totals.total_tokens}</span>
-              </div>
-              <div>
-                {t('api_key_usage.success_count')}:&nbsp;
-                <span className={styles.summaryValue}>{data.totals.success_count}</span>
               </div>
             </div>
 

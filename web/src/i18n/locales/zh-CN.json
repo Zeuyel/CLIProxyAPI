@@ -102,7 +102,8 @@
       "model": "模型",
       "requests": "请求数",
       "tokens": "Token"
-    }
+    },
+    "auto_refresh": "自动刷新（5秒）"
   },
   "header": {
     "check_connection": "检查连接",

@@ -1106,6 +1106,11 @@ func (s *Server) GetClientAuthFileUsage(c *gin.Context) {
 	restricted := len(allowedAuths) > 0
 
 	// Build response
+	type modelUsage struct {
+		Model         string `json:"model"`
+		TotalRequests int    `json:"total_requests"`
+		TotalTokens   int    `json:"total_tokens"`
+	}
 	type authFileUsage struct {
 		AuthID    string `json:"auth_id"`
 		AuthIndex string `json:"auth_index"`
@@ -1120,6 +1125,7 @@ func (s *Server) GetClientAuthFileUsage(c *gin.Context) {
 			FailureCount  int `json:"failure_count"`
 			TotalTokens   int `json:"total_tokens"`
 		} `json:"usage"`
+		Models []modelUsage `json:"models,omitempty"`
 	}
 
 	var authFiles []authFileUsage
@@ -1129,6 +1135,53 @@ func (s *Server) GetClientAuthFileUsage(c *gin.Context) {
 		FailureCount  int `json:"failure_count"`
 		TotalTokens   int `json:"total_tokens"`
 	}{}
+
+	// Get usage statistics snapshot
+	stats := usage.GetRequestStatistics().Snapshot()
+
+	// Build a map of auth index/id -> usage data
+	authUsageMap := make(map[string]*authFileUsage)
+	authModelMap := make(map[string]map[string]*modelUsage) // authKey -> model -> usage
+
+	// Iterate through all APIs and their models to aggregate by auth
+	for _, apiData := range stats.APIs {
+		for modelName, modelData := range apiData.Models {
+			for _, detail := range modelData.Details {
+				// Use auth_index as the key (this is the auth file identifier)
+				authKey := detail.AuthIndex
+				if authKey == "" {
+					authKey = detail.Source
+				}
+				if authKey == "" {
+					continue
+				}
+
+				// Initialize auth usage if not exists
+				if _, exists := authUsageMap[authKey]; !exists {
+					authUsageMap[authKey] = &authFileUsage{
+						AuthIndex: authKey,
+					}
+					authModelMap[authKey] = make(map[string]*modelUsage)
+				}
+
+				au := authUsageMap[authKey]
+				au.Usage.TotalRequests++
+				au.Usage.TotalTokens += int(detail.Tokens.TotalTokens)
+				if detail.Failed {
+					au.Usage.FailureCount++
+				} else {
+					au.Usage.SuccessCount++
+				}
+
+				// Aggregate by model
+				if _, exists := authModelMap[authKey][modelName]; !exists {
+					authModelMap[authKey][modelName] = &modelUsage{Model: modelName}
+				}
+				authModelMap[authKey][modelName].TotalRequests++
+				authModelMap[authKey][modelName].TotalTokens += int(detail.Tokens.TotalTokens)
+			}
+		}
+	}
 
 	// Get auth files from auth manager
 	if s.authManager != nil {
@@ -1159,6 +1212,23 @@ func (s *Server) GetClientAuthFileUsage(c *gin.Context) {
 			if a.Label != "" {
 				af.Label = a.Label
 			}
+
+			// Look up usage data by auth index
+			if au, exists := authUsageMap[a.Index]; exists {
+				af.Usage = au.Usage
+				// Add model breakdown
+				if models, ok := authModelMap[a.Index]; ok {
+					for _, m := range models {
+						af.Models = append(af.Models, *m)
+					}
+				}
+				// Add to totals
+				totals.TotalRequests += af.Usage.TotalRequests
+				totals.SuccessCount += af.Usage.SuccessCount
+				totals.FailureCount += af.Usage.FailureCount
+				totals.TotalTokens += af.Usage.TotalTokens
+			}
+
 			authFiles = append(authFiles, af)
 		}
 	}

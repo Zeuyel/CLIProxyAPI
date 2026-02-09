@@ -59,6 +59,8 @@ export interface UsageDetail {
   auth_index: string;
   request_id?: string;
   session_id?: string;
+  status_code?: number;
+  duration_ms?: number;
   tokens: {
     input_tokens: number;
     output_tokens: number;

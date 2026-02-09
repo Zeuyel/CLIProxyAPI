@@ -20,6 +20,8 @@ type Record struct {
 	Source      string
 	RequestedAt time.Time
 	Failed      bool
+	StatusCode  int
+	DurationMs  int64
 	Detail      Detail
 }
 

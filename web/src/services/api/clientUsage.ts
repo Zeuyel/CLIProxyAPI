@@ -14,8 +14,6 @@ export interface ClientUsageTotals {
 export interface ClientModelUsage {
   model: string;
   total_requests: number;
-  success_count: number;
-  failure_count: number;
   total_tokens: number;
 }
 
