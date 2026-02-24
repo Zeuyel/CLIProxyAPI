@@ -123,6 +123,12 @@ type Config struct {
 	// ReverseProxies defines reverse proxy endpoints for routing traffic.
 	ReverseProxies []ReverseProxy `yaml:"reverse-proxies,omitempty" json:"reverse-proxies,omitempty"`
 
+	// ReverseProxyWorkerURL is an optional global Cloudflare Worker bridge URL.
+	// When set, requests routed via reverse-proxies can be rewritten as:
+	// workerBase/<provider-prefix>/<original-path>/<proxy-host>?query
+	// so one Worker can fan out to multiple Deno proxy hosts.
+	ReverseProxyWorkerURL string `yaml:"reverse-proxy-worker-url,omitempty" json:"reverse-proxy-worker-url,omitempty"`
+
 	// ProxyRouting defines which reverse proxy each provider should use.
 	ProxyRouting ProxyRouting `yaml:"proxy-routing,omitempty" json:"proxy-routing,omitempty"`
 
@@ -187,16 +193,20 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "fill-first".
+	// Supported values: "round-robin" (default), "fill-first", "session".
+	// When set to "session", the Session config below is used for session-aware routing.
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 	// Session configures session-aware routing (sticky sessions + scoring).
+	// Only effective when Strategy is set to "session".
 	Session SessionRoutingConfig `yaml:"session,omitempty" json:"session,omitempty"`
 }
 
 // SessionRoutingConfig configures session stickiness and scoring.
+// Only effective when RoutingConfig.Strategy is set to "session".
 type SessionRoutingConfig struct {
-	// Enabled toggles session-aware routing.
-	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Enabled is deprecated. Use RoutingConfig.Strategy = "session" instead.
+	// Kept for backward compatibility during migration.
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	// Providers restricts session routing to specific provider keys (e.g. ["codex","claude"]).
 	Providers []string `yaml:"providers,omitempty" json:"providers,omitempty"`
 	// TTLSeconds controls how long a session binding stays active.
@@ -221,6 +231,14 @@ type SessionRoutingConfig struct {
 	PenaltyStatus403 float64 `yaml:"penalty-status-403,omitempty" json:"penalty-status-403,omitempty"`
 	// PenaltyStatus5xx sets penalty weight for 5xx responses.
 	PenaltyStatus5xx float64 `yaml:"penalty-status-5xx,omitempty" json:"penalty-status-5xx,omitempty"`
+	// PenaltyExponent controls the exponential growth rate of error penalties.
+	// Higher values (e.g., 1.5-2.0) make penalties grow faster as error rate increases.
+	// Formula: penaltyRatio = 1 - exp(-PenaltyExponent * errorRatio)
+	PenaltyExponent float64 `yaml:"penalty-exponent,omitempty" json:"penalty-exponent,omitempty"`
+	// LoadBalanceMode controls how load penalty is calculated.
+	// "exponential" (default): 1 - exp(-LoadWeight * loadCount / avgLoad) - ensures even distribution
+	// "linear": loadCount / (loadCount + 1) - legacy behavior
+	LoadBalanceMode string `yaml:"load-balance-mode,omitempty" json:"load-balance-mode,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
@@ -412,9 +430,6 @@ type CodexKey struct {
 	// BaseURL is the base URL for the Codex API endpoint.
 	// If empty, the default Codex API URL will be used.
 	BaseURL string `yaml:"base-url" json:"base-url"`
-
-	// Websockets enables the Responses API websocket transport for this credential.
-	Websockets bool `yaml:"websockets,omitempty" json:"websockets,omitempty"`
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
@@ -1107,6 +1122,9 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-excluded-models")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-model-alias")
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "api-key-auth")
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "api-key-expiry")
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "proxy-routing-auth")
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])

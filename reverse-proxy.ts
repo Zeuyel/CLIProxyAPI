@@ -4,6 +4,7 @@ const apiMapping: Record<string, string> = {
   '/antigravity-daily': 'https://daily-cloudcode-pa.googleapis.com',
   '/antigravity-cloudcode': 'https://cloudcode-pa.googleapis.com',
   '/codex': 'https://chatgpt.com',
+  '/openai': 'https://api.openai.com',
 };
 
 // Retry configuration
@@ -115,6 +116,27 @@ function extractPrefixAndRest(pathname: string, prefixes: string[]) {
   return [null, null] as const;
 }
 
+function stripProxyInjectedHeaders(headers: Headers) {
+  const keys: string[] = [];
+  for (const [key] of headers.entries()) {
+    keys.push(key);
+  }
+  for (const key of keys) {
+    const lower = key.toLowerCase();
+    if (
+      lower.startsWith('cf-') ||
+      lower === 'cdn-loop' ||
+      lower === 'via' ||
+      lower === 'traceparent' ||
+      lower === 'tracestate' ||
+      lower === 'true-client-ip' ||
+      lower.startsWith('x-forwarded-')
+    ) {
+      headers.delete(key);
+    }
+  }
+}
+
 Deno.serve(async (request) => {
   const startTime = Date.now();
   const requestId = crypto.randomUUID().slice(0, 8);
@@ -183,6 +205,8 @@ Deno.serve(async (request) => {
         'user-agent',
         'x-goog-api-client',
         'x-goog-api-key',
+        'openai-organization',
+        'openai-project',
       ];
       for (const [key, value] of request.headers.entries()) {
         if (forwardHeaders.includes(key.toLowerCase())) {
@@ -202,6 +226,8 @@ Deno.serve(async (request) => {
     headers.delete('trailer');
     headers.delete('transfer-encoding');
     headers.delete('upgrade');
+    // Strip proxy/CDN injected network identity headers to avoid upstream WAF false positives.
+    stripProxyInjectedHeaders(headers);
     headers.set('Host', targetHost);
     if (!headers.has('User-Agent') && !headers.has('user-agent')) {
       headers.set('User-Agent', 'antigravity/1.104.0');
@@ -229,6 +255,11 @@ Deno.serve(async (request) => {
         responseHeaders.set(key, value);
       }
     }
+
+    // Security headers
+    responseHeaders.set('X-Content-Type-Options', 'nosniff');
+    responseHeaders.set('X-Frame-Options', 'DENY');
+    responseHeaders.set('Referrer-Policy', 'no-referrer');
 
     // Handle streaming response with proper cleanup
     if (response.body) {

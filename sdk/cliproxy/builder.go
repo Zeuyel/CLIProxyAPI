@@ -224,11 +224,21 @@ func (b *Builder) Build() (*Service, error) {
 }
 
 func buildSelectorAndHook(cfg *config.Config) (coreauth.Selector, coreauth.Hook) {
-	if cfg != nil && cfg.Routing.Session.Enabled {
+	strategy := ""
+	if cfg != nil {
+		strategy = strings.ToLower(strings.TrimSpace(cfg.Routing.Strategy))
+	}
+
+	// 向后兼容：如果 session.enabled = true，自动切换到 session 模式
+	if cfg != nil && cfg.Routing.Session.Enabled && strategy != "session" {
+		strategy = "session"
+	}
+
+	if strategy == "session" && cfg != nil {
 		sessionCfg := cfg.Routing.Session
 		selector := coreauth.NewSessionSelector(coreauth.SessionSelectorConfig{
-			Enabled:           sessionCfg.Enabled,
-			Providers:         sessionCfg.Providers,
+			Enabled:          true,
+			Providers:        sessionCfg.Providers,
 			TTL:              time.Duration(sessionCfg.TTLSeconds) * time.Second,
 			FailureThreshold: sessionCfg.FailureThreshold,
 			Cooldown:         time.Duration(sessionCfg.CooldownSeconds) * time.Second,
@@ -240,14 +250,12 @@ func buildSelectorAndHook(cfg *config.Config) (coreauth.Selector, coreauth.Hook)
 			Penalty429:       sessionCfg.PenaltyStatus429,
 			Penalty403:       sessionCfg.PenaltyStatus403,
 			Penalty5xx:       sessionCfg.PenaltyStatus5xx,
+			PenaltyExponent:  sessionCfg.PenaltyExponent,
+			LoadBalanceMode:  sessionCfg.LoadBalanceMode,
 		})
 		return selector, coreauth.SessionSelectorHook{Selector: selector}
 	}
 
-	strategy := ""
-	if cfg != nil {
-		strategy = strings.ToLower(strings.TrimSpace(cfg.Routing.Strategy))
-	}
 	switch strategy {
 	case "fill-first", "fillfirst", "ff":
 		return &coreauth.FillFirstSelector{}, nil

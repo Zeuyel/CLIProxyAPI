@@ -49,6 +49,20 @@ export const reverseProxiesApi = {
     await apiClient.delete(`/reverse-proxies/${id}`);
   },
 
+  async getWorkerUrl(): Promise<string> {
+    const data = await apiClient.get('/reverse-proxy-worker-url');
+    return data['reverse-proxy-worker-url'] || '';
+  },
+
+  async updateWorkerUrl(value: string): Promise<string> {
+    const response = await apiClient.put('/reverse-proxy-worker-url', { value });
+    return response['reverse-proxy-worker-url'] || '';
+  },
+
+  async deleteWorkerUrl(): Promise<void> {
+    await apiClient.delete('/reverse-proxy-worker-url');
+  },
+
   async getRouting(): Promise<ProxyRouting> {
     const data = await apiClient.get('/proxy-routing');
     return data['proxy-routing'] || {};

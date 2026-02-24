@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -70,10 +71,35 @@ func (r *usageReporter) trackFailure(ctx context.Context, errPtr *error) {
 		return
 	}
 	if *errPtr != nil {
+		// Resolve status code from executor error first, then gin context.
+		// This avoids recording 200 for streaming paths where headers were already committed
+		// but the upstream later failed with a concrete status (e.g. 404/408).
+		if r.statusCode == 0 {
+			r.statusCode = resolveStatusCodeFromError(*errPtr)
+		}
+		if r.statusCode == 0 {
+			r.statusCode = resolveStatusCodeFromGinContext(ctx)
+		}
 		// Store error message in Gin context for monitor display
 		storeErrorMessageInContext(ctx, *errPtr)
 		r.publishFailure(ctx)
 	}
+}
+
+func resolveStatusCodeFromError(err error) int {
+	if err == nil {
+		return 0
+	}
+	type statusCoder interface {
+		StatusCode() int
+	}
+	var sc statusCoder
+	if errors.As(err, &sc) && sc != nil {
+		if code := sc.StatusCode(); code > 0 {
+			return code
+		}
+	}
+	return 0
 }
 
 // storeErrorMessageInContext stores the error message in Gin context for monitor display.
@@ -94,6 +120,23 @@ func storeErrorMessageInContext(ctx context.Context, err error) {
 		errMsg = extracted
 	}
 	ginCtx.Set(monitorUpstreamErrorKey, errMsg)
+}
+
+// resolveStatusCodeFromGinContext extracts the HTTP status code from the gin
+// context writer, if available. Returns 0 when the context is not a gin context
+// or the status has not been written yet.
+func resolveStatusCodeFromGinContext(ctx context.Context) int {
+	if ctx == nil {
+		return 0
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return 0
+	}
+	if status := ginCtx.Writer.Status(); status > 0 {
+		return status
+	}
+	return 0
 }
 
 // extractJSONErrorFromString tries to extract error.message from a JSON string.
@@ -128,6 +171,22 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 		return
 	}
 	r.once.Do(func() {
+		// Auto-compute duration if not explicitly set via setPerformance
+		durationMs := r.durationMs
+		if durationMs == 0 && !r.requestedAt.IsZero() {
+			durationMs = time.Since(r.requestedAt).Milliseconds()
+		}
+
+		// Auto-resolve status code if not explicitly set
+		statusCode := r.statusCode
+		if statusCode == 0 {
+			if failed {
+				statusCode = resolveStatusCodeFromGinContext(ctx)
+			} else {
+				statusCode = 200
+			}
+		}
+
 		usage.PublishRecord(ctx, usage.Record{
 			Provider:    r.provider,
 			Model:       r.model,
@@ -139,8 +198,8 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 			SessionID:   r.sessionID,
 			RequestedAt: r.requestedAt,
 			Failed:      failed,
-			StatusCode:  r.statusCode,
-			DurationMs:  r.durationMs,
+			StatusCode:  statusCode,
+			DurationMs:  durationMs,
 			Detail:      detail,
 		})
 	})
@@ -155,6 +214,18 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 		return
 	}
 	r.once.Do(func() {
+		// Auto-compute duration if not explicitly set via setPerformance
+		durationMs := r.durationMs
+		if durationMs == 0 && !r.requestedAt.IsZero() {
+			durationMs = time.Since(r.requestedAt).Milliseconds()
+		}
+
+		// Auto-resolve status code if not explicitly set
+		statusCode := r.statusCode
+		if statusCode == 0 {
+			statusCode = 200
+		}
+
 		usage.PublishRecord(ctx, usage.Record{
 			Provider:    r.provider,
 			Model:       r.model,
@@ -166,8 +237,8 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 			SessionID:   r.sessionID,
 			RequestedAt: r.requestedAt,
 			Failed:      false,
-			StatusCode:  r.statusCode,
-			DurationMs:  r.durationMs,
+			StatusCode:  statusCode,
+			DurationMs:  durationMs,
 			Detail:      usage.Detail{},
 		})
 	})

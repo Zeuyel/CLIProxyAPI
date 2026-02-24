@@ -96,22 +96,43 @@ quota-exceeded:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), fill-first
-  # Session-aware routing (sticky sessions + health/load scoring).
-  # session:
-  #   enabled: true
-  #   providers: ["codex", "claude"]
-  #   ttl-seconds: 300
-  #   failure-threshold: 3
-  #   cooldown-seconds: 300
-  #   load-window-seconds: 600
-  #   load-weight: 0.25
-  #   health-window-requests: 50
-  #   weight-success-rate: 0.6
-  #   weight-quota: 0.4
-  #   penalty-status-429: 1.0
-  #   penalty-status-403: 0.7
-  #   penalty-status-5xx: 0.4
+  # Strategy options: "round-robin" (default), "fill-first", "session"
+  # - round-robin: Cycles through all available credentials
+  # - fill-first: Prioritizes the first available credential
+  # - session: Session-aware routing with health/load scoring and sticky sessions
+  strategy: "round-robin"
+
+  # Session routing configuration (only effective when strategy is "session")
+  session:
+    # Providers to enable session routing for (empty = all providers)
+    providers: ["codex", "claude"]
+    # Session binding TTL in seconds
+    ttl-seconds: 300
+    # Number of consecutive failures before switching to another credential
+    failure-threshold: 3
+    # Cooldown period in seconds after reaching failure threshold
+    cooldown-seconds: 300
+    # Time window in seconds for load tracking
+    load-window-seconds: 600
+    # Load penalty weight (0.0-1.0, higher = stronger load balancing)
+    load-weight: 0.25
+    # Number of recent requests to track for health scoring
+    health-window-requests: 50
+    # Weight for success rate in scoring (0.0-1.0)
+    weight-success-rate: 0.6
+    # Weight for quota health in scoring (0.0-1.0)
+    weight-quota: 0.4
+    # Penalty weights for different error types
+    penalty-status-429: 1.0
+    penalty-status-403: 0.7
+    penalty-status-5xx: 0.4
+    # Exponential error penalty growth rate (1.0-2.0 recommended)
+    # Higher values make penalties grow faster as error rate increases
+    penalty-exponent: 1.0
+    # Load balance mode: "exponential" (default) or "linear"
+    # - exponential: Ensures even distribution across credentials
+    # - linear: Legacy behavior (less aggressive balancing)
+    load-balance-mode: "exponential"
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
@@ -366,12 +387,19 @@ oauth-model-alias:
 #     description: "Main Deno Deploy reverse proxy"        # Optional description
 #     timeout: 120                                          # Optional timeout in seconds
 #     headers:                                              # Optional custom headers
+#       x-worker-token: "your-worker-token"                 # Recommended when chaining through Cloudflare Worker
 #       X-Custom-Header: "custom-value"
 #   - id: "cloudflare-proxy"
 #     name: "Cloudflare Workers Proxy"
 #     base-url: "https://your-worker.workers.dev"
 #     enabled: true
 #     description: "Cloudflare Workers reverse proxy"
+#
+# Optional global Worker bridge URL.
+# When set, requests are rewritten to:
+#   <worker-url>/<provider-prefix>/<original-path>/<proxy-host>?query
+# This allows a single Worker to fan out to many Deno proxy hosts.
+# reverse-proxy-worker-url: "https://your-worker.workers.dev"
 
 # Proxy Routing Configuration
 # Specify which reverse proxy each AI provider should use.

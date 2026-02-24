@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/Button';
 import { IconGithub, IconBookOpen, IconExternalLink, IconCode } from '@/components/ui/icons';
 import { useAuthStore, useConfigStore, useNotificationStore, useModelsStore } from '@/stores';
 import { apiKeysApi } from '@/services/api/apiKeys';
+import { authFilesApi } from '@/services/api/authFiles';
 import { classifyModels } from '@/utils/models';
 import { STORAGE_KEY_AUTH } from '@/utils/constants';
 import styles from './SystemPage.module.scss';
@@ -22,6 +23,7 @@ export function SystemPage() {
   const fetchModelsFromStore = useModelsStore((state) => state.fetchModels);
 
   const [modelStatus, setModelStatus] = useState<{ type: 'success' | 'warning' | 'error' | 'muted'; message: string }>();
+  const [authAssignment, setAuthAssignment] = useState<{ total: number; assigned: number; unassigned: number } | null>(null);
 
   const apiKeysCache = useRef<string[]>([]);
 
@@ -105,6 +107,66 @@ export function SystemPage() {
     }
   };
 
+  const loadAuthAssignmentSummary = useCallback(async () => {
+    if (auth.connectionStatus !== 'connected') {
+      setAuthAssignment(null);
+      return;
+    }
+
+    try {
+      const [authFilesResult, authMap, apiKeysResult] = await Promise.all([
+        authFilesApi.list(),
+        apiKeysApi.getAuthMapping(),
+        apiKeysApi.list(),
+      ]);
+
+      const files = Array.isArray(authFilesResult?.files) ? authFilesResult.files : [];
+      const apiKeys = normalizeApiKeyList(apiKeysResult);
+      const restrictedKeys = new Set(
+        Object.keys(authMap || {})
+          .map((key) => String(key ?? '').trim())
+          .filter(Boolean)
+      );
+      const hasImplicitAllScopeKey = apiKeys.some((key) => !restrictedKeys.has(key));
+
+      const assignedRefs = new Set<string>();
+      Object.values(authMap || {}).forEach((refs) => {
+        if (!Array.isArray(refs)) return;
+        refs.forEach((ref) => {
+          const normalized = String(ref ?? '').trim();
+          if (normalized) assignedRefs.add(normalized);
+        });
+      });
+
+      let assigned = 0;
+      if (hasImplicitAllScopeKey) {
+        assigned = files.length;
+      } else {
+        files.forEach((file) => {
+          const candidates = [
+            String(file?.name ?? '').trim(),
+            String((file as any)?.id ?? '').trim(),
+            String((file as any)?.auth_index ?? '').trim(),
+            String((file as any)?.authIndex ?? '').trim(),
+          ].filter(Boolean);
+
+          if (candidates.some((candidate) => assignedRefs.has(candidate))) {
+            assigned += 1;
+          }
+        });
+      }
+
+      const total = files.length;
+      setAuthAssignment({
+        total,
+        assigned,
+        unassigned: Math.max(total - assigned, 0),
+      });
+    } catch {
+      setAuthAssignment(null);
+    }
+  }, [auth.connectionStatus]);
+
   const handleClearLoginStorage = () => {
     showConfirmation({
       title: t('system_info.clear_login_title', { defaultValue: 'Clear Login Storage' }),
@@ -128,6 +190,10 @@ export function SystemPage() {
   }, [fetchConfig]);
 
   useEffect(() => {
+    loadAuthAssignmentSummary();
+  }, [loadAuthAssignmentSummary]);
+
+  useEffect(() => {
     fetchModels();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auth.connectionStatus, auth.apiBase]);
@@ -139,7 +205,14 @@ export function SystemPage() {
       <Card
         title={t('system_info.connection_status_title')}
         extra={
-          <Button variant="secondary" size="sm" onClick={() => fetchConfig(undefined, true)}>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={async () => {
+              await fetchConfig(undefined, true);
+              await loadAuthAssignmentSummary();
+            }}
+          >
             {t('common.refresh')}
           </Button>
         }
@@ -164,6 +237,20 @@ export function SystemPage() {
             <div className="stat-value">{t(`common.${auth.connectionStatus}_status` as any)}</div>
           </div>
         </div>
+        {authAssignment && (
+          <div
+            className={`${styles.assignmentNotice} ${
+              authAssignment.unassigned > 0 ? styles.assignmentWarning : styles.assignmentOk
+            }`}
+          >
+            {authAssignment.unassigned > 0
+              ? t('system_info.auth_assignment_warning', {
+                  unassigned: authAssignment.unassigned,
+                  total: authAssignment.total,
+                })
+              : t('system_info.auth_assignment_ok', { total: authAssignment.total })}
+          </div>
+        )}
       </Card>
 
       <Card title={t('system_info.quick_links_title')}>

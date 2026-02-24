@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	codexClientVersion   = "0.98.0"
+	codexClientVersion    = "0.98.0"
 	defaultCodexUserAgent = "codex_cli_rs/0.98.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
 )
 
@@ -53,6 +53,7 @@ func (e *CodexExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Aut
 	if strings.TrimSpace(apiKey) != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
+	applyReverseProxyHeaders(req, e.cfg, auth, e.Identifier())
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -127,6 +128,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, err
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, true)
+	applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -230,6 +232,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, false)
+	applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -329,6 +332,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, true)
+	applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID

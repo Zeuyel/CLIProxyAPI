@@ -32,6 +32,27 @@ const expiryISOFromDays = (days: number): string | null => {
   return new Date(Date.now() + days * dayMs).toISOString();
 };
 
+const normalizeRef = (value: unknown): string => String(value ?? '').trim();
+
+const buildAuthRefCandidates = (item: AuthFileItem): string[] => {
+  const seen = new Set<string>();
+  const candidates = [
+    normalizeRef((item as any)?.id),
+    normalizeRef((item as any)?.authIndex ?? (item as any)?.auth_index ?? (item as any)?.authIndexSnake),
+    normalizeRef(item?.name),
+  ];
+  return candidates.filter((candidate) => {
+    if (!candidate || seen.has(candidate)) return false;
+    seen.add(candidate);
+    return true;
+  });
+};
+
+const resolvePrimaryAuthRef = (item: AuthFileItem): string => {
+  const candidates = buildAuthRefCandidates(item);
+  return candidates[0] || '';
+};
+
 export function ApiKeysPage() {
   const { t } = useTranslation();
   const { showNotification, showConfirmation } = useNotificationStore();
@@ -150,15 +171,11 @@ export function ApiKeysPage() {
 
     const next = new Set<string>();
     accounts.forEach((item) => {
-      const name = String(item?.name ?? '').trim();
-      if (!name) return;
-
-      const id = String((item as any)?.id ?? '').trim();
-      const authIndexRaw = (item as any)?.authIndex ?? (item as any)?.auth_index ?? (item as any)?.authIndexSnake;
-      const authIndex = String(authIndexRaw ?? '').trim();
-
-      if (allowed.has(name) || (id && allowed.has(id)) || (authIndex && allowed.has(authIndex))) {
-        next.add(name);
+      const candidates = buildAuthRefCandidates(item);
+      const primaryRef = candidates[0];
+      if (!primaryRef) return;
+      if (candidates.some((candidate) => allowed.has(candidate))) {
+        next.add(primaryRef);
       }
     });
 
@@ -229,6 +246,7 @@ export function ApiKeysPage() {
 
     const isEdit = editingIndex !== null;
     const oldKey = isEdit && editingIndex !== null ? String(apiKeys[editingIndex] ?? '').trim() : '';
+    const keyChanged = !isEdit || oldKey !== trimmed;
     const nextKeys = isEdit
       ? apiKeys.map((key, idx) => (idx === editingIndex ? trimmed : key))
       : [...apiKeys, trimmed];
@@ -269,10 +287,10 @@ export function ApiKeysPage() {
 
     setSaving(true);
     try {
-      if (isEdit && editingIndex !== null) {
+      if (isEdit && editingIndex !== null && keyChanged) {
         await apiKeysApi.update(editingIndex, trimmed);
         showNotification(t('notification.api_key_updated'), 'success');
-      } else {
+      } else if (!isEdit) {
         await apiKeysApi.replace(nextKeys);
         showNotification(t('notification.api_key_added'), 'success');
       }
@@ -281,6 +299,33 @@ export function ApiKeysPage() {
         apiKeysApi.updateAuthMapping(nextAuth),
         apiKeysApi.updateExpiryMapping(nextExpiry),
       ]);
+
+      // Strong consistency: re-read and enforce the intended scope mapping.
+      // "all" must be represented by the absence of this key in api-key-auth.
+      const persistedAuth = await apiKeysApi.getAuthMapping();
+      const persistedEntry = persistedAuth[trimmed];
+      let authNeedsCorrection = false;
+      if (scopeMode === 'all') {
+        if (persistedEntry !== undefined) {
+          delete persistedAuth[trimmed];
+          authNeedsCorrection = true;
+        }
+      } else if (scopeMode === 'deny') {
+        if (!Array.isArray(persistedEntry) || persistedEntry.length !== 0) {
+          persistedAuth[trimmed] = [];
+          authNeedsCorrection = true;
+        }
+      } else {
+        const expected = new Set(nextAuth[trimmed] || []);
+        const current = new Set(Array.isArray(persistedEntry) ? persistedEntry : []);
+        if (expected.size !== current.size || Array.from(expected).some((ref) => !current.has(ref))) {
+          persistedAuth[trimmed] = Array.from(expected);
+          authNeedsCorrection = true;
+        }
+      }
+      if (authNeedsCorrection) {
+        await apiKeysApi.updateAuthMapping(persistedAuth);
+      }
 
       setApiKeys(nextKeys);
       setApiKeyAuth(nextAuth);
@@ -588,31 +633,33 @@ export function ApiKeysPage() {
                   <div className={styles.emptyAuthFiles}>{t('api_keys.accounts_empty')}</div>
                 ) : (
                   filteredAccounts.map((item) => {
-                    const name = String(item.name ?? '').trim();
-                    if (!name) return null;
-                    const checked = selectedAccounts.has(name);
+                    const primaryRef = resolvePrimaryAuthRef(item);
+                    if (!primaryRef) return null;
+                    const name = String(item.name ?? '').trim() || primaryRef;
+                    const checked = selectedAccounts.has(primaryRef);
                     const providerType = String(item.type ?? item.provider ?? '').trim();
                     const authIndexRaw = (item as any)?.authIndex ?? (item as any)?.auth_index;
                     const authIndex = String(authIndexRaw ?? '').trim();
                     const email = String((item as any)?.email ?? (item as any)?.account ?? '').trim();
+                    const checkboxId = `api-key-auth-${primaryRef.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 
                     return (
-                      <div key={name} className={styles.authFileItem}>
+                      <div key={primaryRef} className={styles.authFileItem}>
                         <input
                           type="checkbox"
-                          id={`api-key-auth-${name}`}
+                          id={checkboxId}
                           checked={checked}
                           onChange={() => {
                             setSelectedAccounts((prev) => {
                               const next = new Set(prev);
-                              if (next.has(name)) next.delete(name);
-                              else next.add(name);
+                              if (next.has(primaryRef)) next.delete(primaryRef);
+                              else next.add(primaryRef);
                               return next;
                             });
                           }}
                           disabled={saving}
                         />
-                        <label htmlFor={`api-key-auth-${name}`} className={styles.authFileLabel}>
+                        <label htmlFor={checkboxId} className={styles.authFileLabel}>
                           <div className={styles.authFileMeta}>
                             <div className={styles.authFileName}>{name}</div>
                             <div className={styles.authFileSub}>

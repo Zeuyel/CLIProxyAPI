@@ -491,6 +491,34 @@
   border-bottom: 1px solid var(--border-color);
 }
 
+.assignmentTagRow {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.assignmentTag {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+
+.assignmentTagAssigned {
+  background-color: #ecfdf5;
+  color: #065f46;
+  border-color: #6ee7b7;
+}
+
+.assignmentTagUnassigned {
+  background-color: #fffbeb;
+  color: #92400e;
+  border-color: #f59e0b;
+}
+
 .cardStats {
   display: flex;
   flex-wrap: wrap;

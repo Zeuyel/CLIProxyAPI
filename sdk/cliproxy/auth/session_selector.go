@@ -13,8 +13,8 @@ import (
 
 // SessionSelectorConfig controls session-aware routing behavior.
 type SessionSelectorConfig struct {
-	Enabled           bool
-	Providers         []string
+	Enabled          bool
+	Providers        []string
 	TTL              time.Duration
 	FailureThreshold int
 	Cooldown         time.Duration
@@ -26,6 +26,8 @@ type SessionSelectorConfig struct {
 	Penalty429       float64
 	Penalty403       float64
 	Penalty5xx       float64
+	PenaltyExponent  float64
+	LoadBalanceMode  string
 }
 
 type sessionBinding struct {
@@ -42,8 +44,8 @@ type resultSample struct {
 }
 
 type authStats struct {
-	recentResults  []resultSample
-	recentRequests []time.Time
+	recentResults   []resultSample
+	recentRequests  []time.Time
 	pendingRequests []time.Time
 }
 
@@ -151,33 +153,36 @@ func (s *SessionSelector) Pick(ctx context.Context, provider, model string, opts
 	}
 
 	sessionID := extractSessionIDFromOptions(opts)
-	providerEnabled := s.isProviderEnabled(provider)
+	providerKey := strings.TrimSpace(strings.ToLower(provider))
+	isMixedProvider := providerKey == "mixed"
 
 	s.mu.Lock()
 	s.cleanupLocked(now)
 	var excludedAuthID string
-	if providerEnabled && sessionID != "" {
-		key := s.sessionKey(provider, sessionID)
-		if binding := s.sessions[key]; binding != nil {
-			if binding.lastUsed.Add(s.cfg.TTL).After(now) && binding.cooldownUntil.After(now) {
-				excludedAuthID = binding.authID
-			} else if binding.lastUsed.Add(s.cfg.TTL).After(now) {
-				if auth := findAuthByID(available, binding.authID); auth != nil {
-					binding.lastUsed = now
-					if s.cfg.LoadWindow > 0 {
-						stats := s.stats[auth.ID]
-						if stats == nil {
-							stats = &authStats{}
-							s.stats[auth.ID] = stats
-						}
-						stats.pendingRequests = append(stats.pendingRequests, now)
-						stats.pendingRequests = pruneOldTimestamps(stats.pendingRequests, now.Add(-s.cfg.LoadWindow))
-					}
-					s.mu.Unlock()
-					return auth, nil
-				}
+	if sessionID != "" {
+		if isMixedProvider {
+			if auth, excluded := s.resolveMixedBindingLocked(sessionID, available, now); auth != nil {
+				s.trackPendingRequestLocked(auth.ID, now)
+				s.mu.Unlock()
+				return auth, nil
 			} else {
-				delete(s.sessions, key)
+				excludedAuthID = excluded
+			}
+		} else if s.isProviderEnabled(provider) {
+			key := s.sessionKey(provider, sessionID)
+			if binding := s.sessions[key]; binding != nil {
+				if binding.lastUsed.Add(s.cfg.TTL).After(now) && binding.cooldownUntil.After(now) {
+					excludedAuthID = binding.authID
+				} else if binding.lastUsed.Add(s.cfg.TTL).After(now) {
+					if auth := findAuthByID(available, binding.authID); auth != nil {
+						binding.lastUsed = now
+						s.trackPendingRequestLocked(auth.ID, now)
+						s.mu.Unlock()
+						return auth, nil
+					}
+				} else {
+					delete(s.sessions, key)
+				}
 			}
 		}
 	}
@@ -188,22 +193,20 @@ func (s *SessionSelector) Pick(ctx context.Context, provider, model string, opts
 	}
 
 	selected := s.pickBestCandidateLocked(candidates, model, now)
-	if providerEnabled && sessionID != "" {
-		key := s.sessionKey(provider, sessionID)
-		s.sessions[key] = &sessionBinding{
-			authID:   selected.ID,
-			lastUsed: now,
+	if sessionID != "" {
+		bindingProvider := provider
+		if isMixedProvider {
+			bindingProvider = selected.Provider
+		}
+		if s.isProviderEnabled(bindingProvider) {
+			key := s.sessionKey(bindingProvider, sessionID)
+			s.sessions[key] = &sessionBinding{
+				authID:   selected.ID,
+				lastUsed: now,
+			}
 		}
 	}
-	if s.cfg.LoadWindow > 0 {
-		stats := s.stats[selected.ID]
-		if stats == nil {
-			stats = &authStats{}
-			s.stats[selected.ID] = stats
-		}
-		stats.pendingRequests = append(stats.pendingRequests, now)
-		stats.pendingRequests = pruneOldTimestamps(stats.pendingRequests, now.Add(-s.cfg.LoadWindow))
-	}
+	s.trackPendingRequestLocked(selected.ID, now)
 	s.mu.Unlock()
 	return selected, nil
 }
@@ -251,6 +254,12 @@ func normaliseSessionConfig(cfg SessionSelectorConfig) SessionSelectorConfig {
 	if out.Penalty5xx <= 0 {
 		out.Penalty5xx = 0.4
 	}
+	if out.PenaltyExponent <= 0 {
+		out.PenaltyExponent = 1.0
+	}
+	if out.LoadBalanceMode == "" {
+		out.LoadBalanceMode = "exponential"
+	}
 	return out
 }
 
@@ -285,6 +294,84 @@ func (s *SessionSelector) cleanupLocked(now time.Time) {
 		stats.recentRequests = pruneOldTimestamps(stats.recentRequests, cutoff)
 		stats.pendingRequests = pruneOldTimestamps(stats.pendingRequests, cutoff)
 	}
+}
+
+func (s *SessionSelector) resolveMixedBindingLocked(sessionID string, available []*Auth, now time.Time) (*Auth, string) {
+	if sessionID == "" || len(available) == 0 {
+		return nil, ""
+	}
+
+	availableByID := make(map[string]*Auth, len(available))
+	providerSet := make(map[string]struct{}, len(available))
+	for _, auth := range available {
+		if auth == nil || auth.ID == "" {
+			continue
+		}
+		availableByID[auth.ID] = auth
+		providerKey := strings.TrimSpace(strings.ToLower(auth.Provider))
+		if providerKey == "" {
+			continue
+		}
+		providerSet[providerKey] = struct{}{}
+	}
+
+	var (
+		stickyAuth     *Auth
+		stickyBinding  *sessionBinding
+		stickyLastUsed time.Time
+		excludedAuthID string
+		excludedUsed   time.Time
+	)
+
+	for providerKey := range providerSet {
+		if !s.isProviderEnabled(providerKey) {
+			continue
+		}
+		key := s.sessionKey(providerKey, sessionID)
+		binding := s.sessions[key]
+		if binding == nil {
+			continue
+		}
+		if !binding.lastUsed.Add(s.cfg.TTL).After(now) {
+			delete(s.sessions, key)
+			continue
+		}
+		auth := availableByID[binding.authID]
+		if auth == nil {
+			continue
+		}
+		if binding.cooldownUntil.After(now) {
+			if excludedAuthID == "" || binding.lastUsed.After(excludedUsed) {
+				excludedAuthID = binding.authID
+				excludedUsed = binding.lastUsed
+			}
+			continue
+		}
+		if stickyBinding == nil || binding.lastUsed.After(stickyLastUsed) {
+			stickyAuth = auth
+			stickyBinding = binding
+			stickyLastUsed = binding.lastUsed
+		}
+	}
+
+	if stickyAuth != nil && stickyBinding != nil {
+		stickyBinding.lastUsed = now
+		return stickyAuth, ""
+	}
+	return nil, excludedAuthID
+}
+
+func (s *SessionSelector) trackPendingRequestLocked(authID string, now time.Time) {
+	if s.cfg.LoadWindow <= 0 || authID == "" {
+		return
+	}
+	stats := s.stats[authID]
+	if stats == nil {
+		stats = &authStats{}
+		s.stats[authID] = stats
+	}
+	stats.pendingRequests = append(stats.pendingRequests, now)
+	stats.pendingRequests = pruneOldTimestamps(stats.pendingRequests, now.Add(-s.cfg.LoadWindow))
 }
 
 func (s *SessionSelector) pickBestCandidateLocked(candidates []*Auth, model string, now time.Time) *Auth {
@@ -339,11 +426,22 @@ func (s *SessionSelector) scoreAuthLocked(auth *Auth, model string, now time.Tim
 				}
 			}
 			successRate = float64(successCount) / float64(len(recent))
-			penaltyRatio = clamp01(
-				(float64(count429)*s.cfg.Penalty429+
-					float64(count403)*s.cfg.Penalty403+
-					float64(count5xx)*s.cfg.Penalty5xx)/float64(len(recent)),
-			)
+
+			// 计算加权错误率
+			errorRatio := (float64(count429)*s.cfg.Penalty429 +
+				float64(count403)*s.cfg.Penalty403 +
+				float64(count5xx)*s.cfg.Penalty5xx) / float64(len(recent))
+
+			// 指数惩罚：1 - exp(-k * errorRatio)
+			// 当 errorRatio 很小时，惩罚接近 0
+			// 当 errorRatio 增大时，惩罚指数增长
+			penaltyRatio = 1.0 - math.Exp(-s.cfg.PenaltyExponent*errorRatio)
+			if penaltyRatio < 0 {
+				penaltyRatio = 0
+			}
+			if penaltyRatio > 1 {
+				penaltyRatio = 1
+			}
 		}
 		if s.cfg.LoadWindow > 0 {
 			stats.recentRequests = pruneOldTimestamps(stats.recentRequests, now.Add(-s.cfg.LoadWindow))
@@ -360,11 +458,44 @@ func (s *SessionSelector) scoreAuthLocked(auth *Auth, model string, now time.Tim
 		weighted = (successRate*s.cfg.WeightSuccess + quotaScore*s.cfg.WeightQuota) / weightTotal
 	}
 
+	// 负载惩罚计算
 	loadPenalty := 0.0
 	if loadCount > 0 {
-		loadPenalty = float64(loadCount) / float64(loadCount+1)
+		if s.cfg.LoadBalanceMode == "exponential" {
+			// 计算平均负载
+			avgLoad := 0.0
+			validCount := 0
+			for _, st := range s.stats {
+				if st != nil {
+					count := len(st.recentRequests) + len(st.pendingRequests)
+					avgLoad += float64(count)
+					validCount++
+				}
+			}
+			if validCount > 0 {
+				avgLoad /= float64(validCount)
+			}
+			if avgLoad < 1.0 {
+				avgLoad = 1.0 // 避免除零
+			}
+
+			// 指数负载惩罚：1 - exp(-LoadWeight * loadCount / avgLoad)
+			// 低于平均负载：惩罚很小
+			// 高于平均负载：惩罚快速增长
+			loadPenalty = 1.0 - math.Exp(-s.cfg.LoadWeight*float64(loadCount)/avgLoad)
+			if loadPenalty < 0 {
+				loadPenalty = 0
+			}
+			if loadPenalty > 1 {
+				loadPenalty = 1
+			}
+		} else {
+			// 线性模式（向后兼容）
+			loadPenalty = float64(loadCount) / float64(loadCount+1)
+		}
 	}
-	score := weighted - (loadPenalty * s.cfg.LoadWeight)
+
+	score := weighted - loadPenalty
 	score = score * (1.0 - penaltyRatio)
 	if score < 0 {
 		score = 0

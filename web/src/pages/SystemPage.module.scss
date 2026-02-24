@@ -40,6 +40,27 @@
   align-items: center;
 }
 
+.assignmentNotice {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.assignmentWarning {
+  border-color: #f59e0b;
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.assignmentOk {
+  border-color: #10b981;
+  background: #ecfdf5;
+  color: #065f46;
+}
+
 .infoGrid {
   display: grid;
   gap: $spacing-sm;

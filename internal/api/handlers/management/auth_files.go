@@ -273,47 +273,84 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 
 // GetAuthFileModels returns the models supported by a specific auth file
 func (h *Handler) GetAuthFileModels(c *gin.Context) {
-	name := c.Query("name")
-	if name == "" {
-		c.JSON(400, gin.H{"error": "name is required"})
+	name := strings.TrimSpace(c.Query("name"))
+	authIDQuery := strings.TrimSpace(c.Query("id"))
+	if name == "" && authIDQuery == "" {
+		c.JSON(400, gin.H{"error": "name or id is required"})
 		return
 	}
 
-	// Try to find auth ID via authManager
-	var authID string
+	candidateIDs := make([]string, 0, 4)
+	seenIDs := make(map[string]struct{}, 8)
+	addCandidate := func(id string) {
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" {
+			return
+		}
+		if _, exists := seenIDs[trimmed]; exists {
+			return
+		}
+		seenIDs[trimmed] = struct{}{}
+		candidateIDs = append(candidateIDs, trimmed)
+	}
+
+	// Prefer explicit id/name from query first.
+	addCandidate(authIDQuery)
+	addCandidate(name)
+
+	// Also scan auth manager to resolve legacy/new IDs and filename aliases.
 	if h.authManager != nil {
 		auths := h.authManager.List()
 		for _, auth := range auths {
-			if auth.FileName == name || auth.ID == name {
-				authID = auth.ID
-				break
+			if auth == nil {
+				continue
+			}
+			matchByName := false
+			matchByID := false
+			if name != "" {
+				matchByName = auth.FileName == name || auth.ID == name || filepath.Base(auth.ID) == name
+			}
+			if authIDQuery != "" {
+				matchByID = auth.ID == authIDQuery || auth.FileName == authIDQuery
+			}
+			if matchByName || matchByID {
+				addCandidate(auth.ID)
 			}
 		}
 	}
 
-	if authID == "" {
-		authID = name // fallback to filename as ID
-	}
-
 	// Get models from registry
 	reg := registry.GetGlobalRegistry()
-	models := reg.GetModelsForClient(authID)
+	seenModels := make(map[string]struct{}, 32)
+	result := make([]gin.H, 0, 32)
 
-	result := make([]gin.H, 0, len(models))
-	for _, m := range models {
-		entry := gin.H{
-			"id": m.ID,
+	for _, authID := range candidateIDs {
+		models := reg.GetModelsForClient(authID)
+		for _, m := range models {
+			modelID := strings.TrimSpace(m.ID)
+			if modelID == "" {
+				continue
+			}
+			key := strings.ToLower(modelID)
+			if _, exists := seenModels[key]; exists {
+				continue
+			}
+			seenModels[key] = struct{}{}
+
+			entry := gin.H{
+				"id": modelID,
+			}
+			if m.DisplayName != "" {
+				entry["display_name"] = m.DisplayName
+			}
+			if m.Type != "" {
+				entry["type"] = m.Type
+			}
+			if m.OwnedBy != "" {
+				entry["owned_by"] = m.OwnedBy
+			}
+			result = append(result, entry)
 		}
-		if m.DisplayName != "" {
-			entry["display_name"] = m.DisplayName
-		}
-		if m.Type != "" {
-			entry["type"] = m.Type
-		}
-		if m.OwnedBy != "" {
-			entry["owned_by"] = m.OwnedBy
-		}
-		result = append(result, entry)
 	}
 
 	c.JSON(200, gin.H{"models": result})

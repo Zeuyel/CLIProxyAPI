@@ -1,0 +1,11 @@
+name = "cpa-deno-bridge"
+main = "src/index.js"
+compatibility_date = "2026-02-24"
+workers_dev = true
+account_id = "c4e1c3cccc9089d5c776ffc080a2309c"
+
+[vars]
+UPSTREAM_BASE_URL = ""
+ALLOWED_UPSTREAM_SUFFIXES = ".deno.net,.deno.dev"
+# Optional: if set, caller must provide x-worker-token.
+WORKER_AUTH_TOKEN = ""

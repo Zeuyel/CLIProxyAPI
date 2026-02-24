@@ -6,6 +6,47 @@ import { apiClient } from './client';
 import type { Config, SessionRoutingConfig } from '@/types';
 import { normalizeConfigResponse } from './transformers';
 
+const normalizeSessionRoutingConfig = (raw: any): SessionRoutingConfig => {
+  if (!raw || typeof raw !== 'object') {
+    return { enabled: false };
+  }
+  return {
+    enabled: Boolean(raw.enabled),
+    providers: Array.isArray(raw.providers)
+      ? raw.providers.map((item: unknown) => String(item ?? '').trim()).filter(Boolean)
+      : undefined,
+    ttlSeconds: raw.ttlSeconds ?? raw['ttl-seconds'],
+    failureThreshold: raw.failureThreshold ?? raw['failure-threshold'],
+    cooldownSeconds: raw.cooldownSeconds ?? raw['cooldown-seconds'],
+    loadWindowSeconds: raw.loadWindowSeconds ?? raw['load-window-seconds'],
+    loadWeight: raw.loadWeight ?? raw['load-weight'],
+    healthWindowRequests: raw.healthWindowRequests ?? raw['health-window-requests'],
+    weightSuccessRate: raw.weightSuccessRate ?? raw['weight-success-rate'],
+    weightQuota: raw.weightQuota ?? raw['weight-quota'],
+    penaltyStatus429: raw.penaltyStatus429 ?? raw['penalty-status-429'],
+    penaltyStatus403: raw.penaltyStatus403 ?? raw['penalty-status-403'],
+    penaltyStatus5xx: raw.penaltyStatus5xx ?? raw['penalty-status-5xx'],
+  };
+};
+
+const toSessionRoutingPayload = (session: SessionRoutingConfig): Record<string, any> => ({
+  enabled: Boolean(session.enabled),
+  providers: Array.isArray(session.providers)
+    ? session.providers.map((item) => String(item ?? '').trim()).filter(Boolean)
+    : undefined,
+  'ttl-seconds': session.ttlSeconds,
+  'failure-threshold': session.failureThreshold,
+  'cooldown-seconds': session.cooldownSeconds,
+  'load-window-seconds': session.loadWindowSeconds,
+  'load-weight': session.loadWeight,
+  'health-window-requests': session.healthWindowRequests,
+  'weight-success-rate': session.weightSuccessRate,
+  'weight-quota': session.weightQuota,
+  'penalty-status-429': session.penaltyStatus429,
+  'penalty-status-403': session.penaltyStatus403,
+  'penalty-status-5xx': session.penaltyStatus5xx,
+});
+
 export const configApi = {
   /**
    * 获取配置（会进行字段规范化）
@@ -118,11 +159,12 @@ export const configApi = {
    */
   async getRoutingSession(): Promise<SessionRoutingConfig> {
     const data = await apiClient.get('/routing/session');
-    return data ?? { enabled: false };
+    return normalizeSessionRoutingConfig(data);
   },
 
   /**
    * 更新会话路由配置
    */
-  updateRoutingSession: (session: SessionRoutingConfig) => apiClient.put('/routing/session', session),
+  updateRoutingSession: (session: SessionRoutingConfig) =>
+    apiClient.put('/routing/session', toSessionRoutingPayload(session)),
 };

@@ -26,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 	"golang.org/x/net/context"
 )
 
@@ -60,6 +61,8 @@ const (
 	sessionHeaderKey    = "session_id"
 	sessionHeaderAltKey = "x-session-id"
 	sessionMarker       = "_session_"
+	codexSessionPrefix  = "codex_prev_"
+	codexSessionMinLen  = 21
 	sessionIDMaxLength  = 256
 )
 
@@ -72,10 +75,6 @@ const (
 )
 
 var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.:\-]+$`)
-
-type pinnedAuthContextKey struct{}
-type selectedAuthCallbackContextKey struct{}
-type executionSessionContextKey struct{}
 
 func clientAPIKeyFromGin(c *gin.Context) string {
 	if c == nil {
@@ -94,41 +93,6 @@ func clientAPIKeyFromGin(c *gin.Context) string {
 		}
 	}
 	return ""
-}
-
-// WithPinnedAuthID returns a child context that requests execution on a specific auth ID.
-func WithPinnedAuthID(ctx context.Context, authID string) context.Context {
-	authID = strings.TrimSpace(authID)
-	if authID == "" {
-		return ctx
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithValue(ctx, pinnedAuthContextKey{}, authID)
-}
-
-// WithSelectedAuthIDCallback returns a child context that receives the selected auth ID.
-func WithSelectedAuthIDCallback(ctx context.Context, callback func(string)) context.Context {
-	if callback == nil {
-		return ctx
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithValue(ctx, selectedAuthCallbackContextKey{}, callback)
-}
-
-// WithExecutionSessionID returns a child context tagged with a long-lived execution session ID.
-func WithExecutionSessionID(ctx context.Context, sessionID string) context.Context {
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return ctx
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithValue(ctx, executionSessionContextKey{}, sessionID)
 }
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
@@ -237,15 +201,6 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if clientKey != "" {
 		meta[coreexecutor.ClientAPIKeyMetadataKey] = clientKey
 	}
-	if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
-		meta[coreexecutor.PinnedAuthMetadataKey] = pinnedAuthID
-	}
-	if selectedCallback := selectedAuthIDCallbackFromContext(ctx); selectedCallback != nil {
-		meta[coreexecutor.SelectedAuthCallbackMetadataKey] = selectedCallback
-	}
-	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
-		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
-	}
 	return meta
 }
 
@@ -278,33 +233,47 @@ func updateMonitorRequestContext(ctx context.Context, requestType, model, sessio
 }
 
 func resolveSessionID(ctx context.Context, handlerType string, rawJSON []byte) string {
+	sessionID, _ := resolveSession(ctx, handlerType, rawJSON)
+	return sessionID
+}
+
+func resolveSession(ctx context.Context, handlerType string, rawJSON []byte) (string, []byte) {
 	headers := http.Header{}
 	if ctx != nil {
 		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 			headers = ginCtx.Request.Header
 		}
 	}
-	return extractSessionID(handlerType, rawJSON, headers)
+	normalizedRaw := completeCodexSessionIdentifiers(rawJSON, headers)
+	return extractSessionID(handlerType, normalizedRaw, headers), normalizedRaw
 }
 
 func extractSessionID(handlerType string, rawJSON []byte, headers http.Header) string {
+	if isCodexRequest(rawJSON) {
+		if value := sanitizeCodexSessionID(headers.Get(sessionHeaderKey)); value != "" {
+			return value
+		}
+		if value := sanitizeCodexSessionID(headers.Get(sessionHeaderAltKey)); value != "" {
+			return value
+		}
+		if value := sanitizeCodexSessionID(gjson.GetBytes(rawJSON, "prompt_cache_key").String()); value != "" {
+			return value
+		}
+		if value := sanitizeCodexSessionID(gjson.GetBytes(rawJSON, "metadata.session_id").String()); value != "" {
+			return value
+		}
+		if value := sanitizeCodexSessionID(gjson.GetBytes(rawJSON, "previous_response_id").String()); value != "" {
+			if prefixed := codexSessionPrefix + value; len(prefixed) <= sessionIDMaxLength {
+				return prefixed
+			}
+		}
+	}
 	sessionID := sanitizeSessionID(headers.Get(sessionHeaderKey))
 	if sessionID == "" {
 		sessionID = sanitizeSessionID(headers.Get(sessionHeaderAltKey))
 	}
 	if sessionID != "" {
 		return sessionID
-	}
-	if isCodexRequest(rawJSON) {
-		if value := sanitizeSessionID(gjson.GetBytes(rawJSON, "prompt_cache_key").String()); value != "" {
-			return value
-		}
-		if value := sanitizeSessionID(gjson.GetBytes(rawJSON, "metadata.session_id").String()); value != "" {
-			return value
-		}
-		if value := sanitizeSessionID(gjson.GetBytes(rawJSON, "previous_response_id").String()); value != "" {
-			return "codex_prev_" + value
-		}
 	}
 	if value := extractClaudeSessionFromUserID(gjson.GetBytes(rawJSON, "metadata.user_id").String()); value != "" {
 		return value
@@ -327,6 +296,71 @@ func sanitizeSessionID(value string) string {
 		return ""
 	}
 	return trimmed
+}
+
+func sanitizeCodexSessionID(value string) string {
+	normalized := sanitizeSessionID(value)
+	if len(normalized) < codexSessionMinLen {
+		return ""
+	}
+	return normalized
+}
+
+func completeCodexSessionIdentifiers(rawJSON []byte, headers http.Header) []byte {
+	if !isCodexRequest(rawJSON) {
+		return rawJSON
+	}
+
+	headerSessionID := sanitizeCodexSessionID(headers.Get(sessionHeaderKey))
+	headerAltSessionID := sanitizeCodexSessionID(headers.Get(sessionHeaderAltKey))
+	bodyPromptCacheKey := sanitizeCodexSessionID(gjson.GetBytes(rawJSON, "prompt_cache_key").String())
+	bodyMetadataSessionID := sanitizeCodexSessionID(gjson.GetBytes(rawJSON, "metadata.session_id").String())
+	bodyPrevResponseID := sanitizeCodexSessionID(gjson.GetBytes(rawJSON, "previous_response_id").String())
+	if bodyPrevResponseID != "" {
+		if prefixed := codexSessionPrefix + bodyPrevResponseID; len(prefixed) <= sessionIDMaxLength {
+			bodyPrevResponseID = prefixed
+		} else {
+			bodyPrevResponseID = ""
+		}
+	}
+
+	missingHeader := headerSessionID == "" && headerAltSessionID == ""
+	missingBody := bodyPromptCacheKey == ""
+	if !missingHeader && !missingBody && headerSessionID != "" {
+		return rawJSON
+	}
+
+	sessionID := headerSessionID
+	if sessionID == "" {
+		sessionID = headerAltSessionID
+	}
+	if sessionID == "" {
+		sessionID = bodyPromptCacheKey
+	}
+	if sessionID == "" {
+		sessionID = bodyMetadataSessionID
+	}
+	if sessionID == "" {
+		sessionID = bodyPrevResponseID
+	}
+	if sessionID == "" {
+		sessionID = uuid.NewString()
+	}
+
+	if headers != nil {
+		if strings.TrimSpace(headers.Get(sessionHeaderKey)) == "" {
+			headers.Set(sessionHeaderKey, sessionID)
+		}
+		if strings.TrimSpace(headers.Get(sessionHeaderAltKey)) == "" {
+			headers.Set(sessionHeaderAltKey, sessionID)
+		}
+	}
+	if missingBody {
+		if completed, err := sjson.SetBytes(rawJSON, "prompt_cache_key", sessionID); err == nil {
+			rawJSON = completed
+		}
+	}
+	return rawJSON
 }
 
 func extractClaudeSessionFromUserID(value string) string {
@@ -366,47 +400,6 @@ func mergeMetadata(base, overlay map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
-}
-
-func pinnedAuthIDFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	raw := ctx.Value(pinnedAuthContextKey{})
-	switch v := raw.(type) {
-	case string:
-		return strings.TrimSpace(v)
-	case []byte:
-		return strings.TrimSpace(string(v))
-	default:
-		return ""
-	}
-}
-
-func selectedAuthIDCallbackFromContext(ctx context.Context) func(string) {
-	if ctx == nil {
-		return nil
-	}
-	raw := ctx.Value(selectedAuthCallbackContextKey{})
-	if callback, ok := raw.(func(string)); ok && callback != nil {
-		return callback
-	}
-	return nil
-}
-
-func executionSessionIDFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	raw := ctx.Value(executionSessionContextKey{})
-	switch v := raw.(type) {
-	case string:
-		return strings.TrimSpace(v)
-	case []byte:
-		return strings.TrimSpace(string(v))
-	default:
-		return ""
-	}
 }
 
 // BaseAPIHandler contains the handlers for API endpoints.
@@ -651,7 +644,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
-	sessionID := resolveSessionID(ctx, handlerType, rawJSON)
+	sessionID, normalizedRawJSON := resolveSession(ctx, handlerType, rawJSON)
 	if sessionID != "" {
 		reqMeta[coreexecutor.SessionIDMetadataKey] = sessionID
 		ctx = coreauth.WithSessionID(ctx, sessionID)
@@ -659,12 +652,12 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	updateMonitorRequestContext(ctx, handlerType, normalizedModel, sessionID)
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
-		Payload: cloneBytes(rawJSON),
+		Payload: cloneBytes(normalizedRawJSON),
 	}
 	opts := coreexecutor.Options{
 		Stream:          false,
 		Alt:             alt,
-		OriginalRequest: cloneBytes(rawJSON),
+		OriginalRequest: cloneBytes(normalizedRawJSON),
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
@@ -696,7 +689,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
-	sessionID := resolveSessionID(ctx, handlerType, rawJSON)
+	sessionID, normalizedRawJSON := resolveSession(ctx, handlerType, rawJSON)
 	if sessionID != "" {
 		reqMeta[coreexecutor.SessionIDMetadataKey] = sessionID
 		ctx = coreauth.WithSessionID(ctx, sessionID)
@@ -704,12 +697,12 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	updateMonitorRequestContext(ctx, handlerType, normalizedModel, sessionID)
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
-		Payload: cloneBytes(rawJSON),
+		Payload: cloneBytes(normalizedRawJSON),
 	}
 	opts := coreexecutor.Options{
 		Stream:          false,
 		Alt:             alt,
-		OriginalRequest: cloneBytes(rawJSON),
+		OriginalRequest: cloneBytes(normalizedRawJSON),
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
@@ -744,7 +737,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
-	sessionID := resolveSessionID(ctx, handlerType, rawJSON)
+	sessionID, normalizedRawJSON := resolveSession(ctx, handlerType, rawJSON)
 	if sessionID != "" {
 		reqMeta[coreexecutor.SessionIDMetadataKey] = sessionID
 		ctx = coreauth.WithSessionID(ctx, sessionID)
@@ -752,12 +745,12 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	updateMonitorRequestContext(ctx, handlerType, normalizedModel, sessionID)
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
-		Payload: cloneBytes(rawJSON),
+		Payload: cloneBytes(normalizedRawJSON),
 	}
 	opts := coreexecutor.Options{
 		Stream:          true,
 		Alt:             alt,
-		OriginalRequest: cloneBytes(rawJSON),
+		OriginalRequest: cloneBytes(normalizedRawJSON),
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
@@ -955,26 +948,6 @@ func cloneMetadata(src map[string]any) map[string]any {
 		dst[k] = v
 	}
 	return dst
-}
-
-func cloneHeader(src http.Header) http.Header {
-	if src == nil {
-		return nil
-	}
-	dst := make(http.Header, len(src))
-	for key, values := range src {
-		dst[key] = append([]string(nil), values...)
-	}
-	return dst
-}
-
-func replaceHeader(dst http.Header, src http.Header) {
-	for key := range dst {
-		delete(dst, key)
-	}
-	for key, values := range src {
-		dst[key] = append([]string(nil), values...)
-	}
 }
 
 // WriteErrorResponse writes an error message to the response writer using the HTTP status embedded in the message.

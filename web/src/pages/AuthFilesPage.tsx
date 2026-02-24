@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useInterval } from '@/hooks/useInterval';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
@@ -11,17 +11,33 @@ import { Modal } from '@/components/ui/Modal';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import {
+  ANTIGRAVITY_CONFIG,
+  CODEX_CONFIG,
+  GEMINI_CLI_CONFIG,
+} from '@/components/quota';
+import { useQuotaLoader } from '@/components/quota/useQuotaLoader';
+import { QuotaProgressBar, type QuotaStatusState } from '@/components/quota/QuotaCard';
+import {
   IconBot,
   IconCode,
   IconDownload,
   IconInfo,
+  IconRefreshCw,
   IconTrash2,
   IconX,
 } from '@/components/ui/icons';
 import { useAuthStore, useNotificationStore, useThemeStore } from '@/stores';
 import { authFilesApi, usageApi } from '@/services/api';
+import { apiKeysApi } from '@/services/api/apiKeys';
 import { apiClient } from '@/services/api/client';
-import type { AuthFileItem, OAuthModelMappingEntry } from '@/types';
+import type {
+  AntigravityQuotaState,
+  AuthFileItem,
+  CodexQuotaState,
+  GeminiCliQuotaState,
+  OAuthModelMappingEntry,
+} from '@/types';
+import { isAntigravityFile, isCodexFile, isGeminiCliFile } from '@/utils/quota';
 import {
   calculateStatusBarData,
   collectUsageDetails,
@@ -95,12 +111,7 @@ const OAUTH_PROVIDER_PRESETS = [
 ];
 
 const OAUTH_PROVIDER_EXCLUDES = new Set(['all', 'unknown', 'empty']);
-const MIN_CARD_PAGE_SIZE = 3;
-const MAX_CARD_PAGE_SIZE = 30;
 const MAX_AUTH_FILE_SIZE = 50 * 1024;
-
-const clampCardPageSize = (value: number) =>
-  Math.min(MAX_CARD_PAGE_SIZE, Math.max(MIN_CARD_PAGE_SIZE, Math.round(value)));
 
 interface ExcludedFormState {
   provider: string;
@@ -151,6 +162,12 @@ function isRuntimeOnlyAuthFile(file: AuthFileItem): boolean {
   return false;
 }
 
+function resolveQuotaErrorMessage(t: (key: string) => string, status: number | undefined, fallback: string) {
+  if (status === 404) return t('common.quota_update_required');
+  if (status === 403) return t('common.quota_check_credential');
+  return fallback;
+}
+
 // 解析认证文件的统计数据
 function resolveAuthFileStats(file: AuthFileItem, stats: KeyStats): KeyStatBucket {
   const defaultStats: KeyStatBucket = { success: 0, failure: 0 };
@@ -192,6 +209,22 @@ function resolveAuthFileStats(file: AuthFileItem, stats: KeyStats): KeyStatBucke
   return defaultStats;
 }
 
+function normalizeApiKeyList(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set<string>();
+  const keys: string[] = [];
+
+  input.forEach((item) => {
+    const value = typeof item === 'string' ? item : item?.['api-key'] ?? item?.apiKey ?? '';
+    const trimmed = String(value || '').trim();
+    if (!trimmed || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    keys.push(trimmed);
+  });
+
+  return keys;
+}
+
 export function AuthFilesPage() {
   const { t } = useTranslation();
   const { showNotification, showConfirmation } = useNotificationStore();
@@ -203,13 +236,14 @@ export function AuthFilesPage() {
   const [error, setError] = useState('');
   const [filter, setFilter] = useState<'all' | string>('all');
   const [search, setSearch] = useState('');
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(9);
-  const [pageSizeInput, setPageSizeInput] = useState('9');
   const [uploading, setUploading] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deletingAll, setDeletingAll] = useState(false);
   const [statusUpdating, setStatusUpdating] = useState<Record<string, boolean>>({});
+  const [quotaRefreshingAll, setQuotaRefreshingAll] = useState(false);
+  const [quotaRefreshingSingle, setQuotaRefreshingSingle] = useState<Record<string, boolean>>({});
+  const [apiKeyAuthMap, setApiKeyAuthMap] = useState<Record<string, string[]>>({});
+  const [apiKeys, setApiKeys] = useState<string[]>([]);
   const [keyStats, setKeyStats] = useState<KeyStats>({ bySource: {}, byAuthIndex: {} });
   const [usageDetails, setUsageDetails] = useState<UsageDetail[]>([]);
 
@@ -260,10 +294,45 @@ export function AuthFilesPage() {
   const normalizeProviderKey = (value: string) => value.trim().toLowerCase();
 
   const disableControls = connectionStatus !== 'connected';
+  const { quota: antigravityQuota, loadQuota: loadAntigravityQuota } =
+    useQuotaLoader(ANTIGRAVITY_CONFIG);
+  const { quota: codexQuota, loadQuota: loadCodexQuota } = useQuotaLoader(CODEX_CONFIG);
+  const { quota: geminiCliQuota, loadQuota: loadGeminiCliQuota } =
+    useQuotaLoader(GEMINI_CLI_CONFIG);
 
-  useEffect(() => {
-    setPageSizeInput(String(pageSize));
-  }, [pageSize]);
+  const setQuotaLoadingNoop = useCallback((_loading: boolean, _scope?: 'page' | 'all' | null) => {
+    // Inline quota does not need extra section-level loading state.
+  }, []);
+
+  const loadInlineQuotas = useCallback(
+    async (targets: AuthFileItem[]) => {
+      if (targets.length === 0) return;
+      await Promise.all([
+        loadAntigravityQuota(
+          targets.filter((file) => ANTIGRAVITY_CONFIG.filterFn(file)),
+          'all',
+          setQuotaLoadingNoop
+        ),
+        loadCodexQuota(
+          targets.filter((file) => CODEX_CONFIG.filterFn(file)),
+          'all',
+          setQuotaLoadingNoop
+        ),
+        loadGeminiCliQuota(
+          targets.filter((file) => GEMINI_CLI_CONFIG.filterFn(file)),
+          'all',
+          setQuotaLoadingNoop
+        ),
+      ]);
+    },
+    [loadAntigravityQuota, loadCodexQuota, loadGeminiCliQuota, setQuotaLoadingNoop]
+  );
+
+  const supportsInlineQuota = useCallback((item: AuthFileItem) => {
+    if (isAntigravityFile(item) || isCodexFile(item)) return true;
+    if (isGeminiCliFile(item) && !isRuntimeOnlyAuthFile(item)) return true;
+    return false;
+  }, []);
 
   const modelSourceFileOptions = useMemo(() => {
     const normalizedProvider = normalizeProviderKey(mappingForm.provider);
@@ -379,42 +448,6 @@ export function AuthFilesPage() {
     return prefixProxyUpdatedText !== prefixProxyEditor.originalText;
   }, [prefixProxyEditor?.json, prefixProxyEditor?.originalText, prefixProxyUpdatedText]);
 
-  const commitPageSizeInput = (rawValue: string) => {
-    const trimmed = rawValue.trim();
-    if (!trimmed) {
-      setPageSizeInput(String(pageSize));
-      return;
-    }
-
-    const value = Number(trimmed);
-    if (!Number.isFinite(value)) {
-      setPageSizeInput(String(pageSize));
-      return;
-    }
-
-    const next = clampCardPageSize(value);
-    setPageSize(next);
-    setPageSizeInput(String(next));
-    setPage(1);
-  };
-
-  const handlePageSizeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const rawValue = event.currentTarget.value;
-    setPageSizeInput(rawValue);
-
-    const trimmed = rawValue.trim();
-    if (!trimmed) return;
-
-    const parsed = Number(trimmed);
-    if (!Number.isFinite(parsed)) return;
-
-    const rounded = Math.round(parsed);
-    if (rounded < MIN_CARD_PAGE_SIZE || rounded > MAX_CARD_PAGE_SIZE) return;
-
-    setPageSize(rounded);
-    setPage(1);
-  };
-
   // 格式化修改时间
   const formatModified = (item: AuthFileItem): string => {
     const raw = item['modtime'] ?? item.modified;
@@ -459,6 +492,17 @@ export function AuthFilesPage() {
       // 静默失败
     } finally {
       loadingKeyStatsRef.current = false;
+    }
+  }, []);
+
+  const loadApiKeyAuthMapping = useCallback(async () => {
+    try {
+      const [mapping, keys] = await Promise.all([apiKeysApi.getAuthMapping(), apiKeysApi.list()]);
+      setApiKeyAuthMap(mapping || {});
+      setApiKeys(normalizeApiKeyList(keys));
+    } catch {
+      setApiKeyAuthMap({});
+      setApiKeys([]);
     }
   }, []);
 
@@ -515,8 +559,14 @@ export function AuthFilesPage() {
   }, [showNotification, t]);
 
   const handleHeaderRefresh = useCallback(async () => {
-    await Promise.all([loadFiles(), loadKeyStats(), loadExcluded(), loadModelMappings()]);
-  }, [loadFiles, loadKeyStats, loadExcluded, loadModelMappings]);
+    await Promise.all([
+      loadFiles(),
+      loadKeyStats(),
+      loadExcluded(),
+      loadModelMappings(),
+      loadApiKeyAuthMapping(),
+    ]);
+  }, [loadFiles, loadKeyStats, loadExcluded, loadModelMappings, loadApiKeyAuthMapping]);
 
   useHeaderRefresh(handleHeaderRefresh);
 
@@ -525,7 +575,8 @@ export function AuthFilesPage() {
     loadKeyStats();
     loadExcluded();
     loadModelMappings();
-  }, [loadFiles, loadKeyStats, loadExcluded, loadModelMappings]);
+    loadApiKeyAuthMapping();
+  }, [loadFiles, loadKeyStats, loadExcluded, loadModelMappings, loadApiKeyAuthMapping]);
 
   // 定时刷新状态数据（每240秒）
   useInterval(loadKeyStats, 240_000);
@@ -607,11 +658,90 @@ export function AuthFilesPage() {
     });
   }, [files, filter, search]);
 
-  // 分页计算
-  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
-  const currentPage = Math.min(page, totalPages);
-  const start = (currentPage - 1) * pageSize;
-  const pageItems = filtered.slice(start, start + pageSize);
+  const authAssignments = useMemo(() => {
+    return Object.values(apiKeyAuthMap || {})
+      .filter((refs): refs is string[] => Array.isArray(refs) && refs.length > 0)
+      .map((refs) => {
+        return new Set(
+          refs
+            .map((ref) => String(ref ?? '').trim())
+            .filter(Boolean)
+        );
+      })
+      .filter((refs) => refs.size > 0);
+  }, [apiKeyAuthMap]);
+
+  const implicitAllApiKeyCount = useMemo(() => {
+    if (apiKeys.length === 0) return 0;
+
+    const restrictedKeys = new Set(
+      Object.keys(apiKeyAuthMap || {})
+        .map((key) => String(key ?? '').trim())
+        .filter(Boolean)
+    );
+
+    let count = 0;
+    apiKeys.forEach((key) => {
+      if (!restrictedKeys.has(key)) count += 1;
+    });
+    return count;
+  }, [apiKeyAuthMap, apiKeys]);
+
+  const getAuthFileAssignmentCount = useCallback((item: AuthFileItem) => {
+    if (authAssignments.length === 0 && implicitAllApiKeyCount === 0) return 0;
+
+    const candidates = [
+      String(item?.name ?? '').trim(),
+      String((item as any)?.id ?? '').trim(),
+      String((item as any)?.auth_index ?? '').trim(),
+      String((item as any)?.authIndex ?? '').trim(),
+    ].filter(Boolean);
+
+    let matched = implicitAllApiKeyCount;
+    if (candidates.length === 0) return matched;
+
+    authAssignments.forEach((refs) => {
+      if (candidates.some((candidate) => refs.has(candidate))) {
+        matched += 1;
+      }
+    });
+
+    return matched;
+  }, [authAssignments, implicitAllApiKeyCount]);
+
+  // 认证文件默认全量显示（不分页）
+  const pageItems = filtered;
+  const hasQuotaTargets = useMemo(
+    () => files.some((item) => supportsInlineQuota(item)),
+    [files, supportsInlineQuota]
+  );
+
+  const handleRefreshAllQuotas = useCallback(async () => {
+    const targets = files.filter((item) => supportsInlineQuota(item));
+    if (targets.length === 0) return;
+    setQuotaRefreshingAll(true);
+    try {
+      await loadInlineQuotas(targets);
+    } finally {
+      setQuotaRefreshingAll(false);
+    }
+  }, [files, loadInlineQuotas, supportsInlineQuota]);
+
+  const handleRefreshSingleQuota = useCallback(async (item: AuthFileItem) => {
+    if (!supportsInlineQuota(item)) return;
+    const key = String(item.name || '').trim();
+    if (!key) return;
+    setQuotaRefreshingSingle((prev) => ({ ...prev, [key]: true }));
+    try {
+      await loadInlineQuotas([item]);
+    } finally {
+      setQuotaRefreshingSingle((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    }
+  }, [loadInlineQuotas, supportsInlineQuota]);
 
   // 点击上传
   const handleUploadClick = () => {
@@ -973,6 +1103,7 @@ export function AuthFilesPage() {
 
   // 显示模型列表
   const showModels = async (item: AuthFileItem) => {
+    const authID = String(item.id ?? '').trim() || undefined;
     setModelsFileName(item.name);
     setModelsFileType(item.type || '');
     setModelsList([]);
@@ -988,7 +1119,7 @@ export function AuthFilesPage() {
 
     setModelsLoading(true);
     try {
-      const models = await authFilesApi.getModelsForAuthFile(item.name);
+      const models = await authFilesApi.getModelsForAuthFile(item.name, authID);
       modelsCacheRef.current.set(item.name, models);
       setModelsList(models);
     } catch (err) {
@@ -1278,7 +1409,6 @@ export function AuthFilesPage() {
             }}
             onClick={() => {
               setFilter(type);
-              setPage(1);
             }}
           >
             {getTypeLabel(type)}
@@ -1348,13 +1478,77 @@ export function AuthFilesPage() {
     );
   };
 
+  const renderQuotaSectionByState = (
+    i18nPrefix: string,
+    quota: QuotaStatusState | undefined,
+    successContent: ReactNode
+  ) => {
+    const quotaStatus = quota?.status ?? 'idle';
+    const quotaErrorMessage = resolveQuotaErrorMessage(
+      (key) => t(key),
+      quota?.errorStatus,
+      quota?.error || t('common.unknown_error')
+    );
+
+    return (
+      <div className={styles.quotaSection}>
+        {quotaStatus === 'loading' ? (
+          <div className={styles.quotaMessage}>{t(`${i18nPrefix}.loading`)}</div>
+        ) : quotaStatus === 'idle' ? (
+          <div className={styles.quotaMessage}>{t(`${i18nPrefix}.idle`)}</div>
+        ) : quotaStatus === 'error' ? (
+          <div className={styles.quotaError}>
+            {t(`${i18nPrefix}.load_failed`, {
+              message: quotaErrorMessage,
+            })}
+          </div>
+        ) : (
+          successContent
+        )}
+      </div>
+    );
+  };
+
+  const renderInlineQuota = (item: AuthFileItem) => {
+    const quotaHelpers = { styles, QuotaProgressBar };
+
+    if (isAntigravityFile(item)) {
+      const quota = antigravityQuota[item.name] as AntigravityQuotaState | undefined;
+      const content = quota
+        ? ANTIGRAVITY_CONFIG.renderQuotaItems(quota, t, quotaHelpers)
+        : <div className={styles.quotaMessage}>{t('antigravity_quota.idle')}</div>;
+      return renderQuotaSectionByState('antigravity_quota', quota, content);
+    }
+
+    if (isCodexFile(item)) {
+      const quota = codexQuota[item.name] as CodexQuotaState | undefined;
+      const content = quota
+        ? CODEX_CONFIG.renderQuotaItems(quota, t, quotaHelpers)
+        : <div className={styles.quotaMessage}>{t('codex_quota.idle')}</div>;
+      return renderQuotaSectionByState('codex_quota', quota, content);
+    }
+
+    if (isGeminiCliFile(item) && !isRuntimeOnlyAuthFile(item)) {
+      const quota = geminiCliQuota[item.name] as GeminiCliQuotaState | undefined;
+      const content = quota
+        ? GEMINI_CLI_CONFIG.renderQuotaItems(quota, t, quotaHelpers)
+        : <div className={styles.quotaMessage}>{t('gemini_cli_quota.idle')}</div>;
+      return renderQuotaSectionByState('gemini_cli_quota', quota, content);
+    }
+
+    return null;
+  };
+
   // 渲染单个认证文件卡片
-	  const renderFileCard = (item: AuthFileItem) => {
+		  const renderFileCard = (item: AuthFileItem) => {
 	    const fileStats = resolveAuthFileStats(item, keyStats);
 	    const isRuntimeOnly = isRuntimeOnlyAuthFile(item);
 	    const isAistudio = (item.type || '').toLowerCase() === 'aistudio';
 	    const showModelsButton = !isRuntimeOnly || isAistudio;
 	    const typeColor = getTypeColor(item.type || 'unknown');
+      const showQuotaRefreshButton = supportsInlineQuota(item);
+      const refreshingSingleQuota = quotaRefreshingSingle[item.name] === true;
+      const assignedApiKeyCount = getAuthFileAssignmentCount(item);
 
 	    return (
 	      <div
@@ -1384,19 +1578,49 @@ export function AuthFilesPage() {
           </span>
         </div>
 
-        <div className={styles.cardStats}>
-          <span className={`${styles.statPill} ${styles.statSuccess}`}>
-            {t('stats.success')}: {fileStats.success}
-          </span>
-          <span className={`${styles.statPill} ${styles.statFailure}`}>
-            {t('stats.failure')}: {fileStats.failure}
+        <div className={styles.assignmentTagRow}>
+          <span
+            className={`${styles.assignmentTag} ${
+              assignedApiKeyCount > 0 ? styles.assignmentTagAssigned : styles.assignmentTagUnassigned
+            }`}
+          >
+            {assignedApiKeyCount > 0
+              ? t('auth_files.assignment_tag_assigned', { count: assignedApiKeyCount })
+              : t('auth_files.assignment_tag_unassigned')}
           </span>
         </div>
 
-        {/* 状态监测栏 */}
-        {renderStatusBar(item)}
+	        <div className={styles.cardStats}>
+	          <span className={`${styles.statPill} ${styles.statSuccess}`}>
+	            {t('stats.success')}: {fileStats.success}
+	          </span>
+	          <span className={`${styles.statPill} ${styles.statFailure}`}>
+	            {t('stats.failure')}: {fileStats.failure}
+	          </span>
+	        </div>
+
+          {renderInlineQuota(item)}
+
+	        {/* 状态监测栏 */}
+	        {renderStatusBar(item)}
 
         <div className={styles.cardActions}>
+          {showQuotaRefreshButton && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void handleRefreshSingleQuota(item)}
+              className={styles.iconButton}
+              title={t('common.refresh')}
+              disabled={disableControls || quotaRefreshingAll || refreshingSingleQuota}
+            >
+              {refreshingSingleQuota ? (
+                <LoadingSpinner size={14} />
+              ) : (
+                <IconRefreshCw className={styles.actionIcon} size={16} />
+              )}
+            </Button>
+          )}
           {showModelsButton && (
             <Button
               variant="secondary"
@@ -1499,6 +1723,15 @@ export function AuthFilesPage() {
               {t('common.refresh')}
             </Button>
             <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void handleRefreshAllQuotas()}
+              disabled={disableControls || quotaRefreshingAll || !hasQuotaTargets}
+              loading={quotaRefreshingAll}
+            >
+              {t('common.refresh_all')}
+            </Button>
+            <Button
               size="sm"
               onClick={handleUploadClick}
               disabled={disableControls || uploading}
@@ -1539,29 +1772,8 @@ export function AuthFilesPage() {
               <label>{t('auth_files.search_label')}</label>
               <Input
                 value={search}
-                onChange={(e) => {
-                  setSearch(e.target.value);
-                  setPage(1);
-                }}
+                onChange={(e) => setSearch(e.target.value)}
                 placeholder={t('auth_files.search_placeholder')}
-              />
-            </div>
-            <div className={styles.filterItem}>
-              <label>{t('auth_files.page_size_label')}</label>
-              <input
-                className={styles.pageSizeSelect}
-                type="number"
-                min={MIN_CARD_PAGE_SIZE}
-                max={MAX_CARD_PAGE_SIZE}
-                step={1}
-                value={pageSizeInput}
-                onChange={handlePageSizeChange}
-                onBlur={(e) => commitPageSizeInput(e.currentTarget.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.currentTarget.blur();
-                  }
-                }}
               />
             </div>
           </div>
@@ -1577,35 +1789,6 @@ export function AuthFilesPage() {
           />
         ) : (
           <div className={styles.fileGrid}>{pageItems.map(renderFileCard)}</div>
-        )}
-
-        {/* 分页 */}
-        {!loading && filtered.length > pageSize && (
-          <div className={styles.pagination}>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setPage(Math.max(1, currentPage - 1))}
-              disabled={currentPage <= 1}
-            >
-              {t('auth_files.pagination_prev')}
-            </Button>
-            <div className={styles.pageInfo}>
-              {t('auth_files.pagination_info', {
-                current: currentPage,
-                total: totalPages,
-                count: filtered.length,
-              })}
-            </div>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setPage(Math.min(totalPages, currentPage + 1))}
-              disabled={currentPage >= totalPages}
-            >
-              {t('auth_files.pagination_next')}
-            </Button>
-          </div>
         )}
       </Card>
 

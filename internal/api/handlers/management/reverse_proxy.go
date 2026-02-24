@@ -3,12 +3,16 @@ package management
 import (
 	"fmt"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	log "github.com/sirupsen/logrus"
 )
 
 // GetReverseProxies retrieves all reverse proxy configurations.
@@ -178,6 +182,71 @@ func (h *Handler) DeleteReverseProxy(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "reverse proxy deleted"})
 }
 
+// GetReverseProxyWorkerURL retrieves the global reverse proxy worker URL.
+func (h *Handler) GetReverseProxyWorkerURL(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	c.JSON(http.StatusOK, gin.H{
+		"reverse-proxy-worker-url": h.cfg.ReverseProxyWorkerURL,
+	})
+}
+
+// PutReverseProxyWorkerURL updates the global reverse proxy worker URL.
+func (h *Handler) PutReverseProxyWorkerURL(c *gin.Context) {
+	var body struct {
+		Value *string `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+
+	value := strings.TrimSpace(*body.Value)
+	if value != "" {
+		parsed, err := url.Parse(value)
+		if err != nil || parsed == nil || parsed.Host == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid reverse-proxy-worker-url"})
+			return
+		}
+		if parsed.Scheme != "https" && parsed.Scheme != "http" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "reverse-proxy-worker-url must use http or https"})
+			return
+		}
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.cfg.ReverseProxyWorkerURL = value
+	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":                  "reverse proxy worker url updated",
+		"reverse-proxy-worker-url": value,
+	})
+}
+
+// DeleteReverseProxyWorkerURL clears the global reverse proxy worker URL.
+func (h *Handler) DeleteReverseProxyWorkerURL(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.cfg.ReverseProxyWorkerURL = ""
+	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":                  "reverse proxy worker url deleted",
+		"reverse-proxy-worker-url": "",
+	})
+}
+
 // GetProxyRouting retrieves the proxy routing configuration.
 func (h *Handler) GetProxyRouting(c *gin.Context) {
 	h.mu.Lock()
@@ -196,6 +265,12 @@ func (h *Handler) GetProxyRoutingAuth(c *gin.Context) {
 	routing := h.cfg.ProxyRoutingAuth
 	if routing == nil {
 		routing = map[string]string{}
+	}
+	if clean, changed := h.sanitizeProxyRoutingAuthLocked(); changed {
+		routing = clean
+		if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
+			log.WithError(err).Warn("failed to persist cleaned proxy-routing-auth")
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -258,7 +333,123 @@ func (h *Handler) UpdateProxyRoutingAuth(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":             "proxy routing auth updated",
+		"message":            "proxy routing auth updated",
 		"proxy-routing-auth": clean,
 	})
+}
+
+func (h *Handler) sanitizeProxyRoutingAuthLocked() (map[string]string, bool) {
+	if h == nil || h.cfg == nil {
+		return map[string]string{}, false
+	}
+	if len(h.cfg.ProxyRoutingAuth) == 0 {
+		return map[string]string{}, false
+	}
+
+	known := map[string]struct{}{}
+	if h.authManager != nil {
+		for _, auth := range h.authManager.List() {
+			if auth == nil {
+				continue
+			}
+			// Keep only auth entries that are still valid for routing.
+			// Deleted auth files can remain in authManager memory as "source=memory"
+			// records even when backing file is gone; those should not keep stale
+			// proxy-routing-auth mappings alive.
+			entry := h.buildAuthFileEntry(auth)
+			if entry == nil {
+				continue
+			}
+			source := strings.TrimSpace(fmt.Sprint(entry["source"]))
+			runtimeOnly, _ := entry["runtime_only"].(bool)
+			if strings.EqualFold(source, "memory") && !runtimeOnly {
+				continue
+			}
+			if v := strings.TrimSpace(auth.ID); v != "" {
+				known[v] = struct{}{}
+				if base := strings.TrimSpace(filepath.Base(v)); base != "" && base != "." {
+					known[base] = struct{}{}
+				}
+			}
+			if v := strings.TrimSpace(auth.EnsureIndex()); v != "" {
+				known[v] = struct{}{}
+			}
+			if v := strings.TrimSpace(auth.FileName); v != "" {
+				known[v] = struct{}{}
+			}
+			if path := strings.TrimSpace(authAttribute(auth, "path")); path != "" {
+				known[path] = struct{}{}
+				if base := strings.TrimSpace(filepath.Base(path)); base != "" && base != "." {
+					known[base] = struct{}{}
+				}
+			}
+		}
+	}
+
+	// If auth list is currently unavailable, avoid accidental destructive cleanup.
+	if len(known) == 0 {
+		// Fallback to auth-dir files so stale mappings can still be cleaned when
+		// authManager is unavailable.
+		if h.cfg != nil {
+			authDir := strings.TrimSpace(h.cfg.AuthDir)
+			if authDir != "" {
+				if entries, err := os.ReadDir(authDir); err == nil {
+					for _, entry := range entries {
+						if entry == nil || entry.IsDir() {
+							continue
+						}
+						name := strings.TrimSpace(entry.Name())
+						if name == "" {
+							continue
+						}
+						known[name] = struct{}{}
+						if full := strings.TrimSpace(filepath.Join(authDir, name)); full != "" {
+							known[full] = struct{}{}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// If still no known refs, avoid accidental destructive cleanup.
+	if len(known) == 0 {
+		copyMap := make(map[string]string, len(h.cfg.ProxyRoutingAuth))
+		for key, value := range h.cfg.ProxyRoutingAuth {
+			trimKey := strings.TrimSpace(key)
+			trimValue := strings.TrimSpace(value)
+			if trimKey == "" || trimValue == "" {
+				continue
+			}
+			copyMap[trimKey] = trimValue
+		}
+		if len(copyMap) != len(h.cfg.ProxyRoutingAuth) {
+			h.cfg.ProxyRoutingAuth = copyMap
+			return copyMap, true
+		}
+		return copyMap, false
+	}
+
+	clean := make(map[string]string, len(h.cfg.ProxyRoutingAuth))
+	changed := false
+	for key, value := range h.cfg.ProxyRoutingAuth {
+		trimKey := strings.TrimSpace(key)
+		trimValue := strings.TrimSpace(value)
+		if trimKey == "" || trimValue == "" {
+			changed = true
+			continue
+		}
+		if _, exists := known[trimKey]; !exists {
+			changed = true
+			continue
+		}
+		clean[trimKey] = trimValue
+	}
+	if !changed && len(clean) != len(h.cfg.ProxyRoutingAuth) {
+		changed = true
+	}
+	if changed {
+		h.cfg.ProxyRoutingAuth = clean
+	}
+	return clean, changed
 }

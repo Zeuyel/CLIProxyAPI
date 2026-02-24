@@ -12,7 +12,7 @@ export interface QuotaExceededConfig {
 }
 
 export interface SessionRoutingConfig {
-  enabled: boolean;
+  enabled?: boolean;
   providers?: string[];
   ttlSeconds?: number;
   failureThreshold?: number;
@@ -25,6 +25,8 @@ export interface SessionRoutingConfig {
   penaltyStatus429?: number;
   penaltyStatus403?: number;
   penaltyStatus5xx?: number;
+  penaltyExponent?: number;
+  loadBalanceMode?: string;
 }
 
 export interface Config {

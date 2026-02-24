@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card } from '@/components/ui/Card';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
@@ -37,11 +37,22 @@ export function SettingsPage() {
   const [retryValue, setRetryValue] = useState(0);
   const [logsMaxTotalSizeMb, setLogsMaxTotalSizeMb] = useState(0);
   const [routingStrategy, setRoutingStrategy] = useState('round-robin');
+  const [sessionProvidersText, setSessionProvidersText] = useState('');
   const [sessionConfig, setSessionConfig] = useState<SessionRoutingConfig>({ enabled: false });
   const [pending, setPending] = useState<Record<PendingKey, boolean>>({} as Record<PendingKey, boolean>);
   const [error, setError] = useState('');
 
   const disableControls = connectionStatus !== 'connected';
+  // 向后兼容：如果 session.enabled = true，自动切换到 session 模式
+  const strategyValue = sessionConfig.enabled ? 'session' : routingStrategy;
+  const parsedSessionProviders = useMemo(
+    () =>
+      sessionProvidersText
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean),
+    [sessionProvidersText]
+  );
 
   useEffect(() => {
     const load = async () => {
@@ -79,8 +90,15 @@ export function SettingsPage() {
         }
 
         if (sessionResult.status === 'fulfilled' && sessionResult.value) {
-          setSessionConfig(sessionResult.value);
-          updateConfigValue('routing/session', sessionResult.value);
+          const normalized = {
+            ...sessionResult.value,
+            providers: Array.isArray(sessionResult.value.providers)
+              ? sessionResult.value.providers
+              : [],
+          };
+          setSessionConfig(normalized);
+          setSessionProvidersText((normalized.providers || []).join(', '));
+          updateConfigValue('routing/session', normalized);
         }
       } catch (err: any) {
         setError(err?.message || t('notification.refresh_failed'));
@@ -104,8 +122,18 @@ export function SettingsPage() {
       if (config.routingStrategy) {
         setRoutingStrategy(config.routingStrategy);
       }
+      if (config.routingSession) {
+        const normalized = {
+          ...config.routingSession,
+          providers: Array.isArray(config.routingSession.providers)
+            ? config.routingSession.providers
+            : [],
+        };
+        setSessionConfig(normalized);
+        setSessionProvidersText((normalized.providers || []).join(', '));
+      }
     }
-  }, [config?.proxyUrl, config?.requestRetry, config?.logsMaxTotalSizeMb, config?.routingStrategy]);
+  }, [config?.proxyUrl, config?.requestRetry, config?.logsMaxTotalSizeMb, config?.routingStrategy, config?.routingSession]);
 
   const setPendingFlag = (key: PendingKey, value: boolean) => {
     setPending((prev) => ({ ...prev, [key]: value }));
@@ -233,17 +261,28 @@ export function SettingsPage() {
   };
 
   const handleRoutingStrategyUpdate = async () => {
-    const strategy = routingStrategy.trim();
+    const strategy = strategyValue.trim();
     if (!strategy) {
       showNotification(t('login.error_invalid'), 'error');
       return;
     }
     const previous = config?.routingStrategy ?? 'round-robin';
     setPendingFlag('routingStrategy', true);
-    updateConfigValue('routing/strategy', strategy);
+
     try {
-      await configApi.updateRoutingStrategy(strategy);
-      clearCache('routing/strategy');
+      if (strategy === 'session') {
+        // 切换到 session 模式：更新 routing.strategy = "session"
+        await configApi.updateRoutingStrategy('session');
+        setRoutingStrategy('session');
+        updateConfigValue('routing/strategy', 'session');
+        clearCache('routing/strategy');
+      } else {
+        // 切换到 round-robin 或 fill-first
+        await configApi.updateRoutingStrategy(strategy);
+        setRoutingStrategy(strategy);
+        updateConfigValue('routing/strategy', strategy);
+        clearCache('routing/strategy');
+      }
       showNotification(t('notification.routing_strategy_updated'), 'success');
     } catch (err: any) {
       setRoutingStrategy(previous);
@@ -256,10 +295,15 @@ export function SettingsPage() {
 
   const handleSessionRoutingUpdate = async () => {
     const previous = { ...sessionConfig };
+    const normalizedConfig: SessionRoutingConfig = {
+      ...sessionConfig,
+      providers: parsedSessionProviders,
+    };
     setPendingFlag('sessionRouting', true);
-    updateConfigValue('routing/session', sessionConfig);
+    updateConfigValue('routing/session', normalizedConfig);
     try {
-      await configApi.updateRoutingSession(sessionConfig);
+      await configApi.updateRoutingSession(normalizedConfig);
+      setSessionConfig(normalizedConfig);
       clearCache('routing/session');
       showNotification(t('notification.session_routing_updated'), 'success');
     } catch (err: any) {
@@ -425,43 +469,44 @@ export function SettingsPage() {
       </Card>
 
       <Card title={t('basic_settings.routing_title')}>
-        <div className={`${styles.retryRow} ${styles.retryRowAligned} ${styles.retryRowInputGrow}`}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <div className="form-group">
             <label>{t('basic_settings.routing_strategy_label')}</label>
             <select
               className="input"
-              value={routingStrategy}
-              onChange={(e) => setRoutingStrategy(e.target.value)}
+              value={strategyValue}
+              onChange={(e) => {
+                const next = e.target.value;
+                if (next === 'session') {
+                  setSessionConfig((prev) => ({ ...prev, enabled: true }));
+                } else {
+                  setRoutingStrategy(next);
+                  setSessionConfig((prev) => ({ ...prev, enabled: false }));
+                }
+              }}
               disabled={disableControls || loading}
             >
               <option value="round-robin">{t('basic_settings.routing_strategy_round_robin')}</option>
               <option value="fill-first">{t('basic_settings.routing_strategy_fill_first')}</option>
+              <option value="session">{t('basic_settings.routing_strategy_session')}</option>
             </select>
             <div className="hint">{t('basic_settings.routing_strategy_hint')}</div>
           </div>
-          <Button
-            className={styles.retryButton}
-            onClick={handleRoutingStrategyUpdate}
-            loading={pending.routingStrategy}
-            disabled={disableControls || loading}
-          >
-            {t('basic_settings.routing_strategy_update')}
-          </Button>
-        </div>
-      </Card>
 
-      <Card title={t('basic_settings.session_routing_title')}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <ToggleSwitch
-            label={t('basic_settings.session_routing_enable')}
-            checked={sessionConfig.enabled}
-            disabled={disableControls || pending.sessionRouting || loading}
-            onChange={(value) => updateSessionField('enabled', value)}
-          />
-          <div className="hint" style={{ marginTop: -8 }}>{t('basic_settings.session_routing_hint')}</div>
-
-          {sessionConfig.enabled && (
+          {strategyValue === 'session' && (
             <>
+              <div className={styles.retryRow}>
+                <Input
+                  label={t('basic_settings.session_routing_providers_label')}
+                  hint={t('basic_settings.session_routing_providers_hint')}
+                  value={sessionProvidersText}
+                  onChange={(e) => setSessionProvidersText(e.target.value)}
+                  disabled={disableControls || loading}
+                  placeholder={t('basic_settings.session_routing_providers_placeholder')}
+                  className={styles.retryInput}
+                />
+              </div>
+
               <div className={styles.retryRow}>
                 <Input
                   label={t('basic_settings.session_routing_ttl_label')}
@@ -506,15 +551,166 @@ export function SettingsPage() {
                   className={styles.retryInput}
                 />
               </div>
+
+              <div className={styles.retryRow}>
+                <Input
+                  label={t('basic_settings.session_routing_load_window_label')}
+                  hint={t('basic_settings.session_routing_load_window_hint')}
+                  type="number"
+                  inputMode="numeric"
+                  min={0}
+                  step={1}
+                  value={sessionConfig.loadWindowSeconds ?? 600}
+                  onChange={(e) => updateSessionField('loadWindowSeconds', Number(e.target.value))}
+                  disabled={disableControls || loading}
+                  className={styles.retryInput}
+                />
+              </div>
+
+              <div className={styles.retryRow}>
+                <Input
+                  label={t('basic_settings.session_routing_load_weight_label')}
+                  hint={t('basic_settings.session_routing_load_weight_hint')}
+                  type="number"
+                  inputMode="decimal"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={sessionConfig.loadWeight ?? 0.25}
+                  onChange={(e) => updateSessionField('loadWeight', Number(e.target.value))}
+                  disabled={disableControls || loading}
+                  className={styles.retryInput}
+                />
+              </div>
+
+              <div className={styles.retryRow}>
+                <Input
+                  label={t('basic_settings.session_routing_health_window_label')}
+                  hint={t('basic_settings.session_routing_health_window_hint')}
+                  type="number"
+                  inputMode="numeric"
+                  min={1}
+                  step={1}
+                  value={sessionConfig.healthWindowRequests ?? 50}
+                  onChange={(e) => updateSessionField('healthWindowRequests', Number(e.target.value))}
+                  disabled={disableControls || loading}
+                  className={styles.retryInput}
+                />
+              </div>
+
+              <div className={styles.retryRow}>
+                <Input
+                  label={t('basic_settings.session_routing_weight_success_label')}
+                  hint={t('basic_settings.session_routing_weight_success_hint')}
+                  type="number"
+                  inputMode="decimal"
+                  min={0}
+                  step={0.1}
+                  value={sessionConfig.weightSuccessRate ?? 0.6}
+                  onChange={(e) => updateSessionField('weightSuccessRate', Number(e.target.value))}
+                  disabled={disableControls || loading}
+                  className={styles.retryInput}
+                />
+              </div>
+
+              <div className={styles.retryRow}>
+                <Input
+                  label={t('basic_settings.session_routing_weight_quota_label')}
+                  hint={t('basic_settings.session_routing_weight_quota_hint')}
+                  type="number"
+                  inputMode="decimal"
+                  min={0}
+                  step={0.1}
+                  value={sessionConfig.weightQuota ?? 0.4}
+                  onChange={(e) => updateSessionField('weightQuota', Number(e.target.value))}
+                  disabled={disableControls || loading}
+                  className={styles.retryInput}
+                />
+              </div>
+
+              <div className={styles.retryRow}>
+                <Input
+                  label={t('basic_settings.session_routing_penalty_429_label')}
+                  hint={t('basic_settings.session_routing_penalty_429_hint')}
+                  type="number"
+                  inputMode="decimal"
+                  min={0}
+                  step={0.1}
+                  value={sessionConfig.penaltyStatus429 ?? 1}
+                  onChange={(e) => updateSessionField('penaltyStatus429', Number(e.target.value))}
+                  disabled={disableControls || loading}
+                  className={styles.retryInput}
+                />
+              </div>
+
+              <div className={styles.retryRow}>
+                <Input
+                  label={t('basic_settings.session_routing_penalty_403_label')}
+                  hint={t('basic_settings.session_routing_penalty_403_hint')}
+                  type="number"
+                  inputMode="decimal"
+                  min={0}
+                  step={0.1}
+                  value={sessionConfig.penaltyStatus403 ?? 0.7}
+                  onChange={(e) => updateSessionField('penaltyStatus403', Number(e.target.value))}
+                  disabled={disableControls || loading}
+                  className={styles.retryInput}
+                />
+              </div>
+
+              <div className={styles.retryRow}>
+                <Input
+                  label={t('basic_settings.session_routing_penalty_5xx_label')}
+                  hint={t('basic_settings.session_routing_penalty_5xx_hint')}
+                  type="number"
+                  inputMode="decimal"
+                  min={0}
+                  step={0.1}
+                  value={sessionConfig.penaltyStatus5xx ?? 0.4}
+                  onChange={(e) => updateSessionField('penaltyStatus5xx', Number(e.target.value))}
+                  disabled={disableControls || loading}
+                  className={styles.retryInput}
+                />
+              </div>
+
+              <div className={styles.retryRow}>
+                <Input
+                  label={t('basic_settings.session_routing_penalty_exponent_label')}
+                  hint={t('basic_settings.session_routing_penalty_exponent_hint')}
+                  type="number"
+                  inputMode="decimal"
+                  min={0.1}
+                  max={5}
+                  step={0.1}
+                  value={sessionConfig.penaltyExponent ?? 1.0}
+                  onChange={(e) => updateSessionField('penaltyExponent', Number(e.target.value))}
+                  disabled={disableControls || loading}
+                  className={styles.retryInput}
+                />
+              </div>
+
+              <div className="form-group">
+                <label>{t('basic_settings.session_routing_load_balance_mode_label')}</label>
+                <select
+                  className="input"
+                  value={sessionConfig.loadBalanceMode ?? 'exponential'}
+                  onChange={(e) => updateSessionField('loadBalanceMode', e.target.value)}
+                  disabled={disableControls || loading}
+                >
+                  <option value="exponential">{t('basic_settings.session_routing_load_balance_mode_exponential')}</option>
+                  <option value="linear">{t('basic_settings.session_routing_load_balance_mode_linear')}</option>
+                </select>
+                <div className="hint">{t('basic_settings.session_routing_load_balance_mode_hint')}</div>
+              </div>
             </>
           )}
 
           <Button
-            onClick={handleSessionRoutingUpdate}
-            loading={pending.sessionRouting}
+            onClick={strategyValue === 'session' ? handleSessionRoutingUpdate : handleRoutingStrategyUpdate}
+            loading={pending.routingStrategy || pending.sessionRouting}
             disabled={disableControls || loading}
           >
-            {t('basic_settings.session_routing_update')}
+            {t('basic_settings.routing_strategy_update')}
           </Button>
         </div>
       </Card>

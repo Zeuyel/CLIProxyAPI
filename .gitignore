@@ -29,6 +29,8 @@ web/.vite/
 # Local-only work dirs
 claude-code-hub/
 temp-monitor-repo/
+grok2api/
+go-build.log
 
 # Deno proxy experiments (not part of repo)
 deno-proxy-new.js

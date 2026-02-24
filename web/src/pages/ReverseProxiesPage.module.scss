@@ -52,6 +52,50 @@
   }
 }
 
+.workerConfigCard {
+  border: 2px solid var(--border-color);
+  background: var(--card-bg);
+  padding: $spacing-md;
+}
+
+.workerConfigTitle {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: $spacing-xs;
+}
+
+.workerConfigSubtitle {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: $spacing-sm;
+}
+
+.workerConfigRow {
+  display: flex;
+  gap: $spacing-sm;
+  align-items: center;
+
+  @include mobile {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+.workerConfigHint {
+  margin-top: $spacing-sm;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.workerConfigExample {
+  margin-top: $spacing-xs;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: $font-mono;
+  word-break: break-all;
+}
+
 .filterBar {
   display: flex;
   gap: $spacing-md;

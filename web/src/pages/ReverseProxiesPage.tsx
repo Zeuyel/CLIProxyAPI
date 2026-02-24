@@ -30,6 +30,8 @@ export function ReverseProxiesPage() {
   const [testingProxy, setTestingProxy] = useState<string | null>(null);
   const [filterStatus, setFilterStatus] = useState<'all' | 'enabled' | 'disabled'>('all');
   const [accountQuery, setAccountQuery] = useState('');
+  const [workerUrl, setWorkerUrl] = useState('');
+  const [savingWorker, setSavingWorker] = useState(false);
 
   const [formData, setFormData] = useState({
     name: '',
@@ -51,10 +53,36 @@ export function ReverseProxiesPage() {
     return map;
   }, [proxies]);
 
+  const normalizeKey = (value: unknown) => String(value == null ? '' : value).trim();
+
+  const pathBaseName = (value: string) => {
+    const normalized = value.replace(/\\/g, '/');
+    const segments = normalized.split('/').filter(Boolean);
+    return segments.length > 0 ? segments[segments.length - 1] : '';
+  };
+
   const getAuthKeyCandidates = (authFile: AuthFileItem) => {
-    return [authFile.id, authFile.auth_index, authFile.authIndex, authFile.name]
-      .map((value) => (value == null ? '' : String(value).trim()))
-      .filter(Boolean);
+    const candidates: string[] = [];
+    const seen = new Set<string>();
+    const add = (raw: unknown) => {
+      const key = normalizeKey(raw);
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      candidates.push(key);
+    };
+
+    add(authFile.id);
+    add(authFile.auth_index);
+    add(authFile.authIndex);
+    add(authFile.name);
+
+    const path = normalizeKey((authFile as any).path);
+    if (path) {
+      add(path);
+      add(pathBaseName(path));
+    }
+
+    return candidates;
   };
 
   const getAuthPrimaryKey = (authFile: AuthFileItem) => {
@@ -68,14 +96,22 @@ export function ReverseProxiesPage() {
         return routingMap[key];
       }
     }
+    const normalizedKeySet = new Set(keys.map((key) => key.toLowerCase()));
+    for (const [routingKey, proxyId] of Object.entries(routingMap)) {
+      if (normalizedKeySet.has(routingKey.toLowerCase())) {
+        return proxyId;
+      }
+    }
     return '';
   };
 
   const clearAuthRouting = (routingMap: ProxyRoutingAuth, authFile: AuthFileItem, proxyId?: string) => {
     const keys = getAuthKeyCandidates(authFile);
-    keys.forEach((key) => {
-      if (!proxyId || routingMap[key] === proxyId) {
-        delete routingMap[key];
+    const normalizedKeySet = new Set(keys.map((key) => key.toLowerCase()));
+    Object.keys(routingMap).forEach((routingKey) => {
+      if (!normalizedKeySet.has(routingKey.toLowerCase())) return;
+      if (!proxyId || routingMap[routingKey] === proxyId) {
+        delete routingMap[routingKey];
       }
     });
   };
@@ -98,7 +134,10 @@ export function ReverseProxiesPage() {
   const knownAuthKeys = useMemo(() => {
     const keys = new Set<string>();
     authFiles.forEach((authFile) => {
-      getAuthKeyCandidates(authFile).forEach((key) => keys.add(key));
+      getAuthKeyCandidates(authFile).forEach((key) => {
+        keys.add(key);
+        keys.add(key.toLowerCase());
+      });
     });
     return keys;
   }, [authFiles]);
@@ -141,14 +180,16 @@ export function ReverseProxiesPage() {
     setLoading(true);
     setError('');
     try {
-      const [proxiesData, routingData, authFilesData] = await Promise.all([
+      const [proxiesData, routingData, authFilesData, workerUrlData] = await Promise.all([
         reverseProxiesApi.list(),
         reverseProxiesApi.getRoutingAuth(),
-        authFilesApi.list()
+        authFilesApi.list(),
+        reverseProxiesApi.getWorkerUrl()
       ]);
       setProxies(proxiesData);
       setRouting(routingData);
       setAuthFiles(authFilesData.files || []);
+      setWorkerUrl(workerUrlData || '');
     } catch (err: any) {
       setError(err?.message || t('reverseProxies.loadError'));
     } finally {
@@ -389,6 +430,33 @@ export function ReverseProxiesPage() {
     }
   };
 
+  const handleSaveWorkerConfig = async () => {
+    const value = workerUrl.trim();
+    if (value) {
+      try {
+        const parsed = new URL(value);
+        if (!['http:', 'https:'].includes(parsed.protocol)) {
+          showNotification(t('reverseProxies.workerUrlInvalid'), 'error');
+          return;
+        }
+      } catch {
+        showNotification(t('reverseProxies.workerUrlInvalid'), 'error');
+        return;
+      }
+    }
+
+    setSavingWorker(true);
+    try {
+      const saved = await reverseProxiesApi.updateWorkerUrl(value);
+      setWorkerUrl(saved || '');
+      showNotification(t('reverseProxies.workerUrlSaved'), 'success');
+    } catch (err: any) {
+      showNotification(err?.message || t('reverseProxies.workerUrlSaveError'), 'error');
+    } finally {
+      setSavingWorker(false);
+    }
+  };
+
   return (
     <div className={styles.container}>
       <h1 className={styles.pageTitle}>{t('reverseProxies.title')}</h1>
@@ -407,6 +475,26 @@ export function ReverseProxiesPage() {
             </Button>
           </div>
         </div>
+
+        <Card className={styles.workerConfigCard}>
+          <div className={styles.workerConfigTitle}>{t('reverseProxies.workerConfigTitle')}</div>
+          <div className={styles.workerConfigSubtitle}>{t('reverseProxies.workerConfigSubtitle')}</div>
+          <div className={styles.workerConfigRow}>
+            <Input
+              value={workerUrl}
+              onChange={(e) => setWorkerUrl(e.target.value)}
+              placeholder="https://cpa-deno-bridge.mengcenfay.workers.dev"
+              disabled={disableControls || savingWorker}
+            />
+            <Button onClick={handleSaveWorkerConfig} disabled={disableControls || savingWorker} loading={savingWorker}>
+              {t('common.save')}
+            </Button>
+          </div>
+          <div className={styles.workerConfigHint}>{t('reverseProxies.workerConfigHint')}</div>
+          <div className={styles.workerConfigExample}>
+            {t('reverseProxies.workerConfigExample')}
+          </div>
+        </Card>
 
         {/* 搜索和过滤栏 */}
         {proxies.length > 0 && (
@@ -474,7 +562,7 @@ export function ReverseProxiesPage() {
                 (authFile) => getAssignedProxyId(authFile, routing) === proxy.id
               );
               const unknownAssignments = Object.entries(routing)
-                .filter(([key, id]) => id === proxy.id && !knownAuthKeys.has(key))
+                .filter(([key, id]) => id === proxy.id && !knownAuthKeys.has(key) && !knownAuthKeys.has(key.toLowerCase()))
                 .map(([key]) => key);
 
               return (

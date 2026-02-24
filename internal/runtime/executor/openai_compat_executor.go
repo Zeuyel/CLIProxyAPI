@@ -45,6 +45,7 @@ func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 	if strings.TrimSpace(apiKey) != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
+	applyReverseProxyHeaders(req, e.cfg, auth, e.Identifier())
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -108,6 +109,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
+	url = resolveReverseProxyURLForAuth(e.cfg, auth, e.Identifier(), url)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return resp, err
@@ -117,6 +119,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -204,6 +207,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	url = resolveReverseProxyURLForAuth(e.cfg, auth, e.Identifier(), url)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return nil, err
@@ -213,6 +217,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes

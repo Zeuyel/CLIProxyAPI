@@ -329,7 +329,6 @@ func (s *Server) setupRoutes() {
 		v1.POST("/completions", openaiHandlers.Completions)
 		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
 		v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
-		v1.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		v1.POST("/responses", openaiResponsesHandlers.Responses)
 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
 	}
@@ -529,6 +528,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/reverse-proxies/:id", s.mgmt.UpdateReverseProxy)
 		mgmt.PATCH("/reverse-proxies/:id", s.mgmt.UpdateReverseProxy)
 		mgmt.DELETE("/reverse-proxies/:id", s.mgmt.DeleteReverseProxy)
+		mgmt.GET("/reverse-proxy-worker-url", s.mgmt.GetReverseProxyWorkerURL)
+		mgmt.PUT("/reverse-proxy-worker-url", s.mgmt.PutReverseProxyWorkerURL)
+		mgmt.PATCH("/reverse-proxy-worker-url", s.mgmt.PutReverseProxyWorkerURL)
+		mgmt.DELETE("/reverse-proxy-worker-url", s.mgmt.DeleteReverseProxyWorkerURL)
 
 		// Proxy routing configuration
 		mgmt.GET("/proxy-routing", s.mgmt.GetProxyRouting)

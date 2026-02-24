@@ -207,15 +207,7 @@ func resolveReverseProxyURLWithID(cfg *config.Config, proxyID string, provider s
 		return originalURL
 	}
 
-	// Find the proxy configuration
-	var proxyConfig *config.ReverseProxy
-	for i := range cfg.ReverseProxies {
-		if cfg.ReverseProxies[i].ID == proxyID && cfg.ReverseProxies[i].Enabled {
-			proxyConfig = &cfg.ReverseProxies[i]
-			break
-		}
-	}
-
+	proxyConfig := findReverseProxyByID(cfg, proxyID)
 	if proxyConfig == nil {
 		log.Debugf("reverse proxy %s not found or disabled for provider %s", proxyID, provider)
 		return originalURL
@@ -264,6 +256,12 @@ func resolveReverseProxyURLWithID(cfg *config.Config, proxyID string, provider s
 		newPath = "/" + newPath
 	}
 
+	workerURL := buildReverseProxyWorkerURL(cfg, proxyConfig.BaseURL, prefix, newPath, parsedURL.RawQuery)
+	if workerURL != "" {
+		log.Debugf("reverse proxy: %s -> %s (via worker %s, proxy %s)", originalURL, workerURL, cfg.ReverseProxyWorkerURL, proxyConfig.Name)
+		return workerURL
+	}
+
 	newURL := fmt.Sprintf("%s%s%s", proxyBase, prefix, newPath)
 	if parsedURL.RawQuery != "" {
 		newURL += "?" + parsedURL.RawQuery
@@ -271,4 +269,96 @@ func resolveReverseProxyURLWithID(cfg *config.Config, proxyID string, provider s
 
 	log.Debugf("reverse proxy: %s -> %s (via %s)", originalURL, newURL, proxyConfig.Name)
 	return newURL
+}
+
+func findReverseProxyByID(cfg *config.Config, proxyID string) *config.ReverseProxy {
+	if cfg == nil || proxyID == "" || len(cfg.ReverseProxies) == 0 {
+		return nil
+	}
+	for i := range cfg.ReverseProxies {
+		if cfg.ReverseProxies[i].ID == proxyID && cfg.ReverseProxies[i].Enabled {
+			return &cfg.ReverseProxies[i]
+		}
+	}
+	return nil
+}
+
+func applyReverseProxyHeaders(req *http.Request, cfg *config.Config, auth *cliproxyauth.Auth, provider string) {
+	if req == nil || cfg == nil {
+		return
+	}
+
+	proxyID := resolveProxyIDForAuth(cfg, auth)
+	if proxyID == "" {
+		proxyID = resolveProxyIDForProvider(cfg, provider)
+	}
+	if proxyID == "" {
+		return
+	}
+
+	proxyConfig := findReverseProxyByID(cfg, proxyID)
+	if proxyConfig == nil || len(proxyConfig.Headers) == 0 {
+		return
+	}
+
+	for key, value := range proxyConfig.Headers {
+		k := strings.TrimSpace(key)
+		v := strings.TrimSpace(value)
+		if k == "" || v == "" {
+			continue
+		}
+		if req.Header.Get(k) != "" {
+			continue
+		}
+		req.Header.Set(k, v)
+	}
+}
+
+func buildReverseProxyWorkerURL(cfg *config.Config, proxyBaseURL string, prefix string, path string, rawQuery string) string {
+	if cfg == nil {
+		return ""
+	}
+	workerBase := strings.TrimSpace(cfg.ReverseProxyWorkerURL)
+	if workerBase == "" {
+		return ""
+	}
+
+	workerParsed, err := url.Parse(workerBase)
+	if err != nil || workerParsed == nil || workerParsed.Host == "" {
+		log.Warnf("invalid reverse-proxy-worker-url %q: %v", workerBase, err)
+		return ""
+	}
+
+	upstreamParsed, err := url.Parse(strings.TrimSpace(proxyBaseURL))
+	if err != nil || upstreamParsed == nil || upstreamParsed.Host == "" {
+		log.Warnf("invalid reverse proxy base-url %q for worker routing: %v", proxyBaseURL, err)
+		return ""
+	}
+
+	upstreamHost := strings.TrimSpace(upstreamParsed.Hostname())
+	if upstreamHost == "" {
+		return ""
+	}
+
+	// Avoid recursive worker->worker routing.
+	if strings.EqualFold(strings.TrimSpace(workerParsed.Hostname()), upstreamHost) {
+		return ""
+	}
+
+	normalizedPrefix := "/" + strings.Trim(strings.TrimSpace(prefix), "/")
+	normalizedPath := path
+	if normalizedPath == "" {
+		normalizedPath = "/"
+	}
+	if !strings.HasPrefix(normalizedPath, "/") {
+		normalizedPath = "/" + normalizedPath
+	}
+
+	basePath := normalizedPrefix + normalizedPath
+	basePath = strings.TrimSuffix(basePath, "/")
+	workerTarget := strings.TrimSuffix(workerBase, "/") + basePath + "/" + upstreamHost
+	if rawQuery != "" {
+		workerTarget += "?" + rawQuery
+	}
+	return workerTarget
 }
