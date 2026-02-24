@@ -108,8 +108,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 
-	url := strings.TrimSuffix(baseURL, "/") + endpoint
-	url = resolveReverseProxyURLForAuth(e.cfg, auth, e.Identifier(), url)
+	originalURL := strings.TrimSuffix(baseURL, "/") + endpoint
+	proxyRoute := resolveReverseProxyRouteForAuth(e.cfg, auth, e.Identifier(), originalURL)
+	url := proxyRoute.URL
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return resp, err
@@ -149,19 +150,69 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
-	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("openai compat executor: close response body error: %v", errClose)
-		}
-	}()
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return resp, err
+		if proxyRoute.Proxied && shouldBanReverseProxyOnError(httpResp.StatusCode, string(b)) {
+			banReverseProxyTemporarily(proxyRoute.ProxyID, e.Identifier(), httpResp.StatusCode, string(b))
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("openai compat executor: close response body error: %v", errClose)
+			}
+			fallbackURL := originalURL
+			logWithRequestID(ctx).Warnf("openai compat executor: reverse proxy failed, retrying direct upstream: %s", fallbackURL)
+			httpReq, err = http.NewRequestWithContext(ctx, http.MethodPost, fallbackURL, bytes.NewReader(translated))
+			if err != nil {
+				return resp, err
+			}
+			httpReq.Header.Set("Content-Type", "application/json")
+			if apiKey != "" {
+				httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+			}
+			httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+			applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
+			util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+			recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+				URL:       fallbackURL,
+				Method:    http.MethodPost,
+				Headers:   httpReq.Header.Clone(),
+				Body:      translated,
+				Provider:  e.Identifier(),
+				AuthID:    authID,
+				AuthLabel: authLabel,
+				AuthType:  authType,
+				AuthValue: authValue,
+			})
+			httpResp, err = httpClient.Do(httpReq)
+			if err != nil {
+				recordAPIResponseError(ctx, e.cfg, err)
+				return resp, err
+			}
+			recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+				b, _ := io.ReadAll(httpResp.Body)
+				appendAPIResponseChunk(ctx, e.cfg, b)
+				logWithRequestID(ctx).Debugf("retry request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+				if errClose := httpResp.Body.Close(); errClose != nil {
+					log.Errorf("openai compat executor: close response body error: %v", errClose)
+				}
+				err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+				return resp, err
+			}
+		} else {
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("openai compat executor: close response body error: %v", errClose)
+			}
+			err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+			return resp, err
+		}
 	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("openai compat executor: close response body error: %v", errClose)
+		}
+	}()
 	body, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
@@ -206,8 +257,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		return nil, err
 	}
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
-	url = resolveReverseProxyURLForAuth(e.cfg, auth, e.Identifier(), url)
+	originalURL := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	proxyRoute := resolveReverseProxyRouteForAuth(e.cfg, auth, e.Identifier(), originalURL)
+	url := proxyRoute.URL
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return nil, err
@@ -257,8 +309,54 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("openai compat executor: close response body error: %v", errClose)
 		}
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return nil, err
+		if proxyRoute.Proxied && shouldBanReverseProxyOnError(httpResp.StatusCode, string(b)) {
+			banReverseProxyTemporarily(proxyRoute.ProxyID, e.Identifier(), httpResp.StatusCode, string(b))
+			fallbackURL := originalURL
+			logWithRequestID(ctx).Warnf("openai compat executor: reverse proxy failed, retrying direct upstream: %s", fallbackURL)
+			httpReq, err = http.NewRequestWithContext(ctx, http.MethodPost, fallbackURL, bytes.NewReader(translated))
+			if err != nil {
+				return nil, err
+			}
+			httpReq.Header.Set("Content-Type", "application/json")
+			if apiKey != "" {
+				httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+			}
+			httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+			applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
+			util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+			httpReq.Header.Set("Accept", "text/event-stream")
+			httpReq.Header.Set("Cache-Control", "no-cache")
+			recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+				URL:       fallbackURL,
+				Method:    http.MethodPost,
+				Headers:   httpReq.Header.Clone(),
+				Body:      translated,
+				Provider:  e.Identifier(),
+				AuthID:    authID,
+				AuthLabel: authLabel,
+				AuthType:  authType,
+				AuthValue: authValue,
+			})
+			httpResp, err = httpClient.Do(httpReq)
+			if err != nil {
+				recordAPIResponseError(ctx, e.cfg, err)
+				return nil, err
+			}
+			recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+				b, _ := io.ReadAll(httpResp.Body)
+				appendAPIResponseChunk(ctx, e.cfg, b)
+				logWithRequestID(ctx).Debugf("retry request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+				if errClose := httpResp.Body.Close(); errClose != nil {
+					log.Errorf("openai compat executor: close response body error: %v", errClose)
+				}
+				err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+				return nil, err
+			}
+		} else {
+			err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+			return nil, err
+		}
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	stream = out
@@ -387,9 +485,10 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 }
 
 type statusErr struct {
-	code       int
-	msg        string
-	retryAfter *time.Duration
+	code        int
+	msg         string
+	retryAfter  *time.Duration
+	quotaReason string
 }
 
 func (e statusErr) Error() string {
@@ -400,3 +499,4 @@ func (e statusErr) Error() string {
 }
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
+func (e statusErr) QuotaReason() string        { return e.quotaReason }

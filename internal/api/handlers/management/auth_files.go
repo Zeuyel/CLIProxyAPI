@@ -116,6 +116,39 @@ func parseLastRefreshValue(v any) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+func resolveAuthCooldown(auth *coreauth.Auth, now time.Time) (bool, string, time.Time) {
+	if auth == nil {
+		return false, "", time.Time{}
+	}
+	var (
+		active bool
+		reason string
+		until  time.Time
+	)
+	consider := func(quota coreauth.QuotaState) {
+		if !quota.Exceeded || quota.NextRecoverAt.IsZero() || !quota.NextRecoverAt.After(now) {
+			return
+		}
+		candidateReason := strings.TrimSpace(quota.Reason)
+		if candidateReason == "" {
+			candidateReason = "quota"
+		}
+		if !active || quota.NextRecoverAt.Before(until) {
+			active = true
+			reason = candidateReason
+			until = quota.NextRecoverAt
+		}
+	}
+	consider(auth.Quota)
+	for _, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		consider(state.Quota)
+	}
+	return active, reason, until
+}
+
 func isWebUIRequest(c *gin.Context) bool {
 	raw := strings.TrimSpace(c.Query("is_webui"))
 	if raw == "" {
@@ -421,6 +454,19 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		"runtime_only":   runtimeOnly,
 		"source":         "memory",
 		"size":           int64(0),
+	}
+	cooldownActive, cooldownReason, cooldownUntil := resolveAuthCooldown(auth, time.Now())
+	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
+		entry["disabled_effective"] = true
+		entry["disabled_reason"] = "manual"
+	} else if cooldownActive {
+		entry["disabled_effective"] = true
+		entry["disabled_reason"] = cooldownReason
+		entry["cooldown_active"] = true
+		entry["cooldown_reason"] = cooldownReason
+		entry["cooldown_until"] = cooldownUntil
+	} else {
+		entry["disabled_effective"] = false
 	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email

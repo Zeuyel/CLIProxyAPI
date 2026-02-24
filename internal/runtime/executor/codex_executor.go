@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 const (
 	codexClientVersion    = "0.98.0"
 	defaultCodexUserAgent = "codex_cli_rs/0.98.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
+	codexUsageURL         = "https://chatgpt.com/backend-api/wham/usage"
 )
 
 var dataTag = []byte("data:")
@@ -121,8 +123,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		body, _ = sjson.SetBytes(body, "instructions", "")
 	}
 
-	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	url = resolveReverseProxyURLForAuth(e.cfg, auth, "codex", url)
+	originalURL := strings.TrimSuffix(baseURL, "/") + "/responses"
+	proxyRoute := resolveReverseProxyRouteForAuth(e.cfg, auth, "codex", originalURL)
+	url := proxyRoute.URL
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
 	if err != nil {
 		return resp, err
@@ -152,19 +155,64 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
-	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("codex executor: close response body error: %v", errClose)
-		}
-	}()
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return resp, err
+		if proxyRoute.Proxied && shouldBanReverseProxyOnError(httpResp.StatusCode, string(b)) {
+			banReverseProxyTemporarily(proxyRoute.ProxyID, e.Identifier(), httpResp.StatusCode, string(b))
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("codex executor: close response body error: %v", errClose)
+			}
+			fallbackURL := originalURL
+			logWithRequestID(ctx).Warnf("codex executor: reverse proxy failed, retrying direct upstream: %s", fallbackURL)
+			httpReq, err = e.cacheHelper(ctx, from, fallbackURL, req, body)
+			if err != nil {
+				return resp, err
+			}
+			applyCodexHeaders(httpReq, auth, apiKey, true)
+			applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
+			recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+				URL:       fallbackURL,
+				Method:    http.MethodPost,
+				Headers:   httpReq.Header.Clone(),
+				Body:      body,
+				Provider:  e.Identifier(),
+				AuthID:    authID,
+				AuthLabel: authLabel,
+				AuthType:  authType,
+				AuthValue: authValue,
+			})
+			httpResp, err = httpClient.Do(httpReq)
+			if err != nil {
+				recordAPIResponseError(ctx, e.cfg, err)
+				return resp, err
+			}
+			recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+				b, _ := io.ReadAll(httpResp.Body)
+				appendAPIResponseChunk(ctx, e.cfg, b)
+				logWithRequestID(ctx).Debugf("retry request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+				if errClose := httpResp.Body.Close(); errClose != nil {
+					log.Errorf("codex executor: close response body error: %v", errClose)
+				}
+				err = newCodexStatusErr(ctx, httpClient, auth, httpResp.StatusCode, b, httpResp.Header)
+				return resp, err
+			}
+		} else {
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("codex executor: close response body error: %v", errClose)
+			}
+			err = newCodexStatusErr(ctx, httpClient, auth, httpResp.StatusCode, b, httpResp.Header)
+			return resp, err
+		}
 	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("codex executor: close response body error: %v", errClose)
+		}
+	}()
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
@@ -266,7 +314,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = newCodexStatusErr(ctx, httpClient, auth, httpResp.StatusCode, b, httpResp.Header)
 		return resp, err
 	}
 	data, err := io.ReadAll(httpResp.Body)
@@ -325,8 +373,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		body, _ = sjson.SetBytes(body, "instructions", "")
 	}
 
-	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	url = resolveReverseProxyURLForAuth(e.cfg, auth, "codex", url)
+	originalURL := strings.TrimSuffix(baseURL, "/") + "/responses"
+	proxyRoute := resolveReverseProxyRouteForAuth(e.cfg, auth, "codex", originalURL)
+	url := proxyRoute.URL
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
 	if err != nil {
 		return nil, err
@@ -369,8 +418,51 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 		appendAPIResponseChunk(ctx, e.cfg, data)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
-		return nil, err
+		if proxyRoute.Proxied && shouldBanReverseProxyOnError(httpResp.StatusCode, string(data)) {
+			banReverseProxyTemporarily(proxyRoute.ProxyID, e.Identifier(), httpResp.StatusCode, string(data))
+			fallbackURL := originalURL
+			logWithRequestID(ctx).Warnf("codex executor: reverse proxy failed, retrying direct upstream: %s", fallbackURL)
+			httpReq, err = e.cacheHelper(ctx, from, fallbackURL, req, body)
+			if err != nil {
+				return nil, err
+			}
+			applyCodexHeaders(httpReq, auth, apiKey, true)
+			applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
+			recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+				URL:       fallbackURL,
+				Method:    http.MethodPost,
+				Headers:   httpReq.Header.Clone(),
+				Body:      body,
+				Provider:  e.Identifier(),
+				AuthID:    authID,
+				AuthLabel: authLabel,
+				AuthType:  authType,
+				AuthValue: authValue,
+			})
+			httpResp, err = httpClient.Do(httpReq)
+			if err != nil {
+				recordAPIResponseError(ctx, e.cfg, err)
+				return nil, err
+			}
+			recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+				data, readErr = io.ReadAll(httpResp.Body)
+				if errClose := httpResp.Body.Close(); errClose != nil {
+					log.Errorf("codex executor: close response body error: %v", errClose)
+				}
+				if readErr != nil {
+					recordAPIResponseError(ctx, e.cfg, readErr)
+					return nil, readErr
+				}
+				appendAPIResponseChunk(ctx, e.cfg, data)
+				logWithRequestID(ctx).Debugf("retry request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+				err = newCodexStatusErr(ctx, httpClient, auth, httpResp.StatusCode, data, httpResp.Header)
+				return nil, err
+			}
+		} else {
+			err = newCodexStatusErr(ctx, httpClient, auth, httpResp.StatusCode, data, httpResp.Header)
+			return nil, err
+		}
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	stream = out
@@ -448,6 +540,225 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	usageJSON := fmt.Sprintf(`{"response":{"usage":{"input_tokens":%d,"output_tokens":0,"total_tokens":%d}}}`, count, count)
 	translated := sdktranslator.TranslateTokenCount(ctx, to, from, count, []byte(usageJSON))
 	return cliproxyexecutor.Response{Payload: []byte(translated)}, nil
+}
+
+type codexQuotaCooldownHint struct {
+	retryAfter time.Duration
+	reason     string
+}
+
+func newCodexStatusErr(ctx context.Context, client *http.Client, auth *cliproxyauth.Auth, statusCode int, body []byte, headers http.Header) statusErr {
+	sErr := statusErr{code: statusCode, msg: string(body)}
+	if statusCode != http.StatusTooManyRequests {
+		return sErr
+	}
+	if retryAfter := parseRetryAfterHeader(headers); retryAfter != nil {
+		sErr.retryAfter = retryAfter
+	}
+	if hint, ok := fetchCodexQuotaCooldownHint(ctx, client, auth); ok {
+		if hint.retryAfter > 0 {
+			retryAfter := hint.retryAfter
+			sErr.retryAfter = &retryAfter
+		}
+		sErr.quotaReason = hint.reason
+	}
+	return sErr
+}
+
+func parseRetryAfterHeader(headers http.Header) *time.Duration {
+	if len(headers) == 0 {
+		return nil
+	}
+	raw := strings.TrimSpace(headers.Get("Retry-After"))
+	if raw == "" {
+		return nil
+	}
+	if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {
+		retryAfter := time.Duration(seconds) * time.Second
+		return &retryAfter
+	}
+	retryAt, err := http.ParseTime(raw)
+	if err != nil {
+		return nil
+	}
+	retryAfter := time.Until(retryAt)
+	if retryAfter <= 0 {
+		return nil
+	}
+	return &retryAfter
+}
+
+func fetchCodexQuotaCooldownHint(ctx context.Context, client *http.Client, auth *cliproxyauth.Auth) (codexQuotaCooldownHint, bool) {
+	var hint codexQuotaCooldownHint
+	if client == nil || auth == nil {
+		return hint, false
+	}
+	token, _ := codexCreds(auth)
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return hint, false
+	}
+	accountID := ""
+	if auth.Metadata != nil {
+		if value, ok := auth.Metadata["account_id"].(string); ok {
+			accountID = strings.TrimSpace(value)
+		}
+	}
+
+	reqCtx := ctx
+	if reqCtx == nil {
+		reqCtx = context.Background()
+	}
+	reqCtx, cancel := context.WithTimeout(reqCtx, 3*time.Second)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodGet, codexUsageURL, nil)
+	if err != nil {
+		return hint, false
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("User-Agent", defaultCodexUserAgent)
+	if accountID != "" {
+		httpReq.Header.Set("Chatgpt-Account-Id", accountID)
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return hint, false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return hint, false
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return hint, false
+	}
+	if len(body) == 0 {
+		return hint, false
+	}
+	now := time.Now()
+	retryAt, reason, ok := codexQuotaRecoverAt(body, now)
+	if !ok || retryAt.IsZero() || !retryAt.After(now) {
+		return hint, false
+	}
+	hint.retryAfter = retryAt.Sub(now)
+	hint.reason = reason
+	return hint, true
+}
+
+func codexQuotaRecoverAt(payload []byte, now time.Time) (time.Time, string, bool) {
+	root := gjson.ParseBytes(payload)
+	candidates := make([]struct {
+		resetAt time.Time
+		reason  string
+	}, 0, 4)
+
+	addByRateLimit := func(rateLimit gjson.Result, reasonPrimary, reasonSecondary string) {
+		if !rateLimit.Exists() || rateLimit.Type == gjson.Null {
+			return
+		}
+		parentLimited := rateLimit.Get("limit_reached").Bool() || rateLimit.Get("limitReached").Bool()
+		if allowed := rateLimit.Get("allowed"); allowed.Exists() && !allowed.Bool() {
+			parentLimited = true
+		}
+		appendCodexWindowCandidate(&candidates, rateLimit.Get("primary_window"), parentLimited, reasonPrimary, now)
+		appendCodexWindowCandidate(&candidates, rateLimit.Get("primaryWindow"), parentLimited, reasonPrimary, now)
+		appendCodexWindowCandidate(&candidates, rateLimit.Get("secondary_window"), parentLimited, reasonSecondary, now)
+		appendCodexWindowCandidate(&candidates, rateLimit.Get("secondaryWindow"), parentLimited, reasonSecondary, now)
+	}
+
+	addByRateLimit(root.Get("rate_limit"), "codex_5h_limit", "codex_weekly_limit")
+	addByRateLimit(root.Get("rateLimit"), "codex_5h_limit", "codex_weekly_limit")
+	addByRateLimit(root.Get("code_review_rate_limit"), "codex_code_review_limit", "codex_code_review_limit")
+	addByRateLimit(root.Get("codeReviewRateLimit"), "codex_code_review_limit", "codex_code_review_limit")
+
+	if len(candidates) == 0 {
+		return time.Time{}, "", false
+	}
+	earliest := candidates[0]
+	for i := 1; i < len(candidates); i++ {
+		if candidates[i].resetAt.Before(earliest.resetAt) {
+			earliest = candidates[i]
+		}
+	}
+	return earliest.resetAt, earliest.reason, true
+}
+
+func appendCodexWindowCandidate(candidates *[]struct {
+	resetAt time.Time
+	reason  string
+}, window gjson.Result, parentLimited bool, reason string, now time.Time) {
+	if !window.Exists() || window.Type == gjson.Null {
+		return
+	}
+	windowLimited := parentLimited
+	if usedPercent, ok := gjsonToFloat(window.Get("used_percent")); ok && usedPercent >= 100 {
+		windowLimited = true
+	}
+	if usedPercent, ok := gjsonToFloat(window.Get("usedPercent")); ok && usedPercent >= 100 {
+		windowLimited = true
+	}
+	if !windowLimited {
+		return
+	}
+	resetAt, ok := codexWindowRecoverAt(window, now)
+	if !ok || !resetAt.After(now) {
+		return
+	}
+	*candidates = append(*candidates, struct {
+		resetAt time.Time
+		reason  string
+	}{
+		resetAt: resetAt,
+		reason:  reason,
+	})
+}
+
+func codexWindowRecoverAt(window gjson.Result, now time.Time) (time.Time, bool) {
+	if resetAt, ok := gjsonToFloat(window.Get("reset_at")); ok && resetAt > 0 {
+		return time.Unix(int64(resetAt), 0), true
+	}
+	if resetAt, ok := gjsonToFloat(window.Get("resetAt")); ok && resetAt > 0 {
+		return time.Unix(int64(resetAt), 0), true
+	}
+	if resetAfter, ok := gjsonToFloat(window.Get("reset_after_seconds")); ok && resetAfter > 0 {
+		return now.Add(time.Duration(resetAfter * float64(time.Second))), true
+	}
+	if resetAfter, ok := gjsonToFloat(window.Get("resetAfterSeconds")); ok && resetAfter > 0 {
+		return now.Add(time.Duration(resetAfter * float64(time.Second))), true
+	}
+	return time.Time{}, false
+}
+
+func gjsonToFloat(result gjson.Result) (float64, bool) {
+	if !result.Exists() {
+		return 0, false
+	}
+	switch result.Type {
+	case gjson.Number:
+		return result.Float(), true
+	case gjson.String:
+		trimmed := strings.TrimSpace(result.String())
+		if trimmed == "" {
+			return 0, false
+		}
+		parsed, err := strconv.ParseFloat(trimmed, 64)
+		if err != nil {
+			return 0, false
+		}
+		return parsed, true
+	default:
+		trimmed := strings.TrimSpace(result.String())
+		if trimmed == "" {
+			return 0, false
+		}
+		parsed, err := strconv.ParseFloat(trimmed, 64)
+		if err != nil {
+			return 0, false
+		}
+		return parsed, true
+	}
 }
 
 func tokenizerForCodexModel(model string) (tokenizer.Codec, error) {

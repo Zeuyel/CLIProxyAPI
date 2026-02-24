@@ -82,6 +82,8 @@ type Result struct {
 	Success bool
 	// RetryAfter carries a provider supplied retry hint (e.g. 429 retryDelay).
 	RetryAfter *time.Duration
+	// QuotaReason carries a provider-specific cooldown reason (e.g. codex_5h_limit).
+	QuotaReason string
 	// Error describes the failure when Success is false.
 	Error *Error
 }
@@ -629,6 +631,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if ra := retryAfterFromError(errExec); ra != nil {
 				result.RetryAfter = ra
 			}
+			result.QuotaReason = quotaReasonFromError(errExec)
 			m.MarkResult(execCtx, result)
 			lastErr = errExec
 			if !shouldRotateAuthOnError(errExec) {
@@ -685,6 +688,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			if ra := retryAfterFromError(errExec); ra != nil {
 				result.RetryAfter = ra
 			}
+			result.QuotaReason = quotaReasonFromError(errExec)
 			m.MarkResult(execCtx, result)
 			lastErr = errExec
 			if !shouldRotateAuthOnError(errExec) {
@@ -739,6 +743,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
+			result.QuotaReason = quotaReasonFromError(errStream)
 			m.MarkResult(execCtx, result)
 			lastErr = errStream
 			if !shouldRotateAuthOnError(errStream) {
@@ -759,7 +764,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 					if errors.As(chunk.Err, &se) && se != nil {
 						rerr.HTTPStatus = se.StatusCode()
 					}
-					m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: false, Error: rerr})
+					result := Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: false, Error: rerr}
+					result.RetryAfter = retryAfterFromError(chunk.Err)
+					result.QuotaReason = quotaReasonFromError(chunk.Err)
+					m.MarkResult(streamCtx, result)
 				}
 				if !forward {
 					continue
@@ -1231,6 +1239,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				case 429:
 					var next time.Time
 					backoffLevel := state.Quota.BackoffLevel
+					quotaReason := strings.TrimSpace(result.QuotaReason)
+					if quotaReason == "" {
+						quotaReason = "quota"
+					}
 					if result.RetryAfter != nil {
 						next = now.Add(*result.RetryAfter)
 					} else {
@@ -1243,7 +1255,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					state.NextRetryAfter = next
 					state.Quota = QuotaState{
 						Exceeded:      true,
-						Reason:        "quota",
+						Reason:        quotaReason,
 						NextRecoverAt: next,
 						BackoffLevel:  backoffLevel,
 					}
@@ -1265,7 +1277,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				auth.UpdatedAt = now
 				updateAggregatedAvailability(auth, now)
 			} else {
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
+				applyAuthFailureState(auth, result.Error, result.RetryAfter, result.QuotaReason, now)
 			}
 		}
 
@@ -1324,6 +1336,7 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 	earliestRetry := time.Time{}
 	quotaExceeded := false
 	quotaRecover := time.Time{}
+	quotaReason := ""
 	maxBackoffLevel := 0
 	for _, state := range auth.ModelStates {
 		if state == nil {
@@ -1350,8 +1363,15 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 		}
 		if state.Quota.Exceeded {
 			quotaExceeded = true
+			stateReason := strings.TrimSpace(state.Quota.Reason)
+			if stateReason == "" {
+				stateReason = "quota"
+			}
 			if quotaRecover.IsZero() || (!state.Quota.NextRecoverAt.IsZero() && state.Quota.NextRecoverAt.Before(quotaRecover)) {
 				quotaRecover = state.Quota.NextRecoverAt
+				quotaReason = stateReason
+			} else if quotaReason == "" {
+				quotaReason = stateReason
 			}
 			if state.Quota.BackoffLevel > maxBackoffLevel {
 				maxBackoffLevel = state.Quota.BackoffLevel
@@ -1365,8 +1385,11 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 		auth.NextRetryAfter = time.Time{}
 	}
 	if quotaExceeded {
+		if quotaReason == "" {
+			quotaReason = "quota"
+		}
 		auth.Quota.Exceeded = true
-		auth.Quota.Reason = "quota"
+		auth.Quota.Reason = quotaReason
 		auth.Quota.NextRecoverAt = quotaRecover
 		auth.Quota.BackoffLevel = maxBackoffLevel
 	} else {
@@ -1481,6 +1504,20 @@ func retryAfterFromError(err error) *time.Duration {
 	return &val
 }
 
+func quotaReasonFromError(err error) string {
+	if err == nil {
+		return ""
+	}
+	type quotaReasonProvider interface {
+		QuotaReason() string
+	}
+	var qrp quotaReasonProvider
+	if errors.As(err, &qrp) && qrp != nil {
+		return strings.TrimSpace(qrp.QuotaReason())
+	}
+	return ""
+}
+
 func statusCodeFromResult(err *Error) int {
 	if err == nil {
 		return 0
@@ -1488,7 +1525,7 @@ func statusCodeFromResult(err *Error) int {
 	return err.StatusCode()
 }
 
-func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
+func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, quotaReason string, now time.Time) {
 	if auth == nil {
 		return
 	}
@@ -1515,7 +1552,11 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	case 429:
 		auth.StatusMessage = "quota exhausted"
 		auth.Quota.Exceeded = true
-		auth.Quota.Reason = "quota"
+		reason := strings.TrimSpace(quotaReason)
+		if reason == "" {
+			reason = "quota"
+		}
+		auth.Quota.Reason = reason
 		var next time.Time
 		if retryAfter != nil {
 			next = now.Add(*retryAfter)
