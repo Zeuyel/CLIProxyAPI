@@ -24,6 +24,11 @@ export interface AuthFileItem {
   authIndex?: string | number | null;
   runtimeOnly?: boolean | string;
   disabled?: boolean;
+  disabledEffective?: boolean;
+  disabledReason?: string;
+  cooldownActive?: boolean;
+  cooldownReason?: string;
+  cooldownUntil?: string | number | Date;
   modified?: number;
   [key: string]: any;
 }

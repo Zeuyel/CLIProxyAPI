@@ -497,6 +497,31 @@
   justify-content: flex-start;
 }
 
+.disabledInfoRow {
+  display: flex;
+  align-items: center;
+  gap: $spacing-xs;
+  flex-wrap: wrap;
+}
+
+.disabledBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #92400e;
+  background-color: #fef3c7;
+  border: 1px solid #f59e0b;
+}
+
+.disabledReason {
+  font-size: 12px;
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
 .assignmentTag {
   display: inline-flex;
   align-items: center;

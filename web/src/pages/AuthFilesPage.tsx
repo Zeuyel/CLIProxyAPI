@@ -162,6 +162,30 @@ function isRuntimeOnlyAuthFile(file: AuthFileItem): boolean {
   return false;
 }
 
+function parseTimestampValue(raw: unknown): Date | null {
+  if (!raw) return null;
+  const asNumber = Number(raw);
+  const date =
+    Number.isFinite(asNumber) && !Number.isNaN(asNumber)
+      ? new Date(asNumber < 1e12 ? asNumber * 1000 : asNumber)
+      : new Date(String(raw));
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function isEffectiveDisabled(file: AuthFileItem): boolean {
+  const raw = file['disabled_effective'] ?? file.disabledEffective;
+  if (typeof raw === 'boolean') return raw || file.disabled === true;
+  if (typeof raw === 'string') return raw.trim().toLowerCase() === 'true' || file.disabled === true;
+  return file.disabled === true;
+}
+
+function isCooldownDisabled(file: AuthFileItem): boolean {
+  const raw = file['cooldown_active'] ?? file.cooldownActive;
+  if (typeof raw === 'boolean') return raw;
+  if (typeof raw === 'string') return raw.trim().toLowerCase() === 'true';
+  return false;
+}
+
 function resolveQuotaErrorMessage(t: (key: string) => string, status: number | undefined, fallback: string) {
   if (status === 404) return t('common.quota_update_required');
   if (status === 403) return t('common.quota_check_credential');
@@ -451,13 +475,39 @@ export function AuthFilesPage() {
   // 格式化修改时间
   const formatModified = (item: AuthFileItem): string => {
     const raw = item['modtime'] ?? item.modified;
-    if (!raw) return '-';
-    const asNumber = Number(raw);
-    const date =
-      Number.isFinite(asNumber) && !Number.isNaN(asNumber)
-        ? new Date(asNumber < 1e12 ? asNumber * 1000 : asNumber)
-        : new Date(String(raw));
-    return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString();
+    const date = parseTimestampValue(raw);
+    return date ? date.toLocaleString() : '-';
+  };
+
+  const resolveDisabledReason = (item: AuthFileItem): string | null => {
+    if (!isEffectiveDisabled(item)) return null;
+    const cooldownActive = isCooldownDisabled(item);
+    const cooldownUntilRaw = item['cooldown_until'] ?? item.cooldownUntil;
+    const cooldownUntil = parseTimestampValue(cooldownUntilRaw);
+    const untilText = cooldownUntil ? cooldownUntil.toLocaleString() : null;
+    const reasonRaw = String(item['disabled_reason'] ?? item.disabledReason ?? '').trim().toLowerCase();
+
+    if (!cooldownActive || reasonRaw === 'manual' || item.disabled === true) {
+      return t('auth_files.disabled_reason_manual');
+    }
+    if (reasonRaw === 'codex_5h_limit') {
+      return untilText
+        ? t('auth_files.disabled_reason_cooldown_5h_until', { time: untilText })
+        : t('auth_files.disabled_reason_cooldown_5h');
+    }
+    if (reasonRaw === 'codex_weekly_limit') {
+      return untilText
+        ? t('auth_files.disabled_reason_cooldown_weekly_until', { time: untilText })
+        : t('auth_files.disabled_reason_cooldown_weekly');
+    }
+    if (reasonRaw === 'codex_code_review_limit') {
+      return untilText
+        ? t('auth_files.disabled_reason_cooldown_code_review_until', { time: untilText })
+        : t('auth_files.disabled_reason_cooldown_code_review');
+    }
+    return untilText
+      ? t('auth_files.disabled_reason_cooldown_generic_until', { time: untilText })
+      : t('auth_files.disabled_reason_cooldown_generic');
   };
 
   // 加载文件列表
@@ -1543,6 +1593,9 @@ export function AuthFilesPage() {
 		  const renderFileCard = (item: AuthFileItem) => {
 	    const fileStats = resolveAuthFileStats(item, keyStats);
 	    const isRuntimeOnly = isRuntimeOnlyAuthFile(item);
+      const effectiveDisabled = isEffectiveDisabled(item);
+      const cooldownActive = isCooldownDisabled(item);
+      const disabledReason = resolveDisabledReason(item);
 	    const isAistudio = (item.type || '').toLowerCase() === 'aistudio';
 	    const showModelsButton = !isRuntimeOnly || isAistudio;
 	    const typeColor = getTypeColor(item.type || 'unknown');
@@ -1553,7 +1606,7 @@ export function AuthFilesPage() {
 	    return (
 	      <div
 	        key={item.name}
-	        className={`${styles.fileCard} ${item.disabled ? styles.fileCardDisabled : ''}`}
+	        className={`${styles.fileCard} ${effectiveDisabled ? styles.fileCardDisabled : ''}`}
 	      >
 	        <div className={styles.cardHeader}>
 	          <span
@@ -1589,6 +1642,13 @@ export function AuthFilesPage() {
               : t('auth_files.assignment_tag_unassigned')}
           </span>
         </div>
+
+        {disabledReason && (
+          <div className={styles.disabledInfoRow}>
+            <span className={styles.disabledBadge}>{t('common.disabled')}</span>
+            <span className={styles.disabledReason}>{disabledReason}</span>
+          </div>
+        )}
 
 	        <div className={styles.cardStats}>
 	          <span className={`${styles.statPill} ${styles.statSuccess}`}>
@@ -1685,8 +1745,8 @@ export function AuthFilesPage() {
             <div className={styles.statusToggle}>
               <ToggleSwitch
                 ariaLabel={t('auth_files.status_toggle_label')}
-                checked={!item.disabled}
-                disabled={disableControls || statusUpdating[item.name] === true}
+                checked={!effectiveDisabled}
+                disabled={disableControls || statusUpdating[item.name] === true || cooldownActive}
                 onChange={(value) => void handleStatusToggle(item, value)}
               />
             </div>
