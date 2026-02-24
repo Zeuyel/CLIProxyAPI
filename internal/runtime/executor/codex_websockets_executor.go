@@ -363,7 +363,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 }
 
-func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
+func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream *cliproxyexecutor.StreamResult, err error) {
 	log.Debugf("Executing Codex Websockets stream request with auth ID: %s, model: %s", auth.ID, req.Model)
 	if ctx == nil {
 		ctx = context.Background()
@@ -516,7 +516,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	markCodexWebsocketCreateSent(sess, conn, wsReqBody)
 
 	out := make(chan cliproxyexecutor.StreamChunk)
-	stream = out
+	stream = &cliproxyexecutor.StreamResult{Chunks: out}
 	go func() {
 		terminateReason := "completed"
 		var terminateErr error
@@ -871,7 +871,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	}
 	headers.Set("OpenAI-Beta", betaHeader)
 	misc.EnsureHeader(headers, ginHeaders, "Session_id", uuid.NewString())
-	misc.EnsureHeader(headers, ginHeaders, "User-Agent", codexUserAgent)
+	misc.EnsureHeader(headers, ginHeaders, "User-Agent", codexUserAgent(ctx))
 
 	isAPIKey := false
 	if auth != nil && auth.Attributes != nil {
@@ -1343,7 +1343,7 @@ func (e *CodexAutoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	return e.httpExec.Execute(ctx, auth, req, opts)
 }
 
-func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
+func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	if e == nil || e.httpExec == nil || e.wsExec == nil {
 		return nil, fmt.Errorf("codex auto executor: executor is nil")
 	}

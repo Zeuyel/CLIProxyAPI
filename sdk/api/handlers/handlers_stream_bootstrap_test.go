@@ -291,7 +291,7 @@ func TestExecuteStreamWithAuthManager_PinnedAuthKeepsSameUpstream(t *testing.T) 
 		},
 	}, manager)
 	ctx := WithPinnedAuthID(context.Background(), "auth1")
-	dataChan, errChan := handler.ExecuteStreamWithAuthManager(ctx, "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(ctx, "openai", "test-model", []byte(`{"model":"test-model"}`), "")
 	if dataChan == nil || errChan == nil {
 		t.Fatalf("expected non-nil channels")
 	}
@@ -355,7 +355,7 @@ func TestExecuteStreamWithAuthManager_SelectedAuthCallbackReceivesAuthID(t *test
 	ctx := WithSelectedAuthIDCallback(context.Background(), func(authID string) {
 		selectedAuthID = authID
 	})
-	dataChan, errChan := handler.ExecuteStreamWithAuthManager(ctx, "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(ctx, "openai", "test-model", []byte(`{"model":"test-model"}`), "")
 	if dataChan == nil || errChan == nil {
 		t.Fatalf("expected non-nil channels")
 	}

@@ -24,10 +24,10 @@ func (e *replaceAwareExecutor) Execute(context.Context, *Auth, cliproxyexecutor.
 	return cliproxyexecutor.Response{}, nil
 }
 
-func (e *replaceAwareExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
+func (e *replaceAwareExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	ch := make(chan cliproxyexecutor.StreamChunk)
 	close(ch)
-	return ch, nil
+	return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
 }
 
 func (e *replaceAwareExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
